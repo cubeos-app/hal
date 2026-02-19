@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -449,8 +450,9 @@ func (h *HALHandler) EnableAndroidTethering(w http.ResponseWriter, r *http.Reque
 		errorResponse(w, http.StatusBadRequest, "no Android device detected")
 		return
 	}
-	// HF05-11: Use execWithTimeout
-	if _, err := execWithTimeout(r.Context(), "dhclient", status.Interface); err != nil {
+	// B84: Use nsenter to run dhclient in host mount namespace
+	// HAL runs in Alpine container — dhclient only exists on the host
+	if _, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--", "dhclient", status.Interface); err != nil {
 		log.Printf("cellular: dhclient failed on %s: %v", status.Interface, err)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("DHCP", err))
 		return
@@ -462,18 +464,42 @@ func (h *HALHandler) EnableAndroidTethering(w http.ResponseWriter, r *http.Reque
 // @Router /cellular/android/disable [post]
 func (h *HALHandler) DisableAndroidTethering(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	for _, iface := range []string{"usb0", "rndis0"} {
-		execWithTimeout(ctx, "dhclient", "-r", iface)
+
+	// Legacy interface names
+	interfaces := []string{"usb0", "rndis0"}
+
+	// B84: Also release enx* interfaces (predictable names for Android tethering)
+	entries, _ := os.ReadDir("/sys/class/net")
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "enx") {
+			interfaces = append(interfaces, e.Name())
+		}
+	}
+
+	for _, iface := range interfaces {
+		// B84: Use nsenter for host mount namespace (dhclient is on host, not in Alpine container)
+		execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--", "dhclient", "-r", iface)
 		execWithTimeout(ctx, "ip", "link", "set", iface, "down")
 	}
 	successResponse(w, "Android tethering disabled")
 }
 
-// checkAndroidTethering checks for Android USB tethering interface
+// checkAndroidTethering checks for Android USB tethering interface.
+// Checks legacy names (usb0, rndis0) and predictable names (enx*). (B84 fix)
 func (h *HALHandler) checkAndroidTethering(ctx context.Context) AndroidTetheringStatus {
 	status := AndroidTetheringStatus{}
 
-	interfaces := []string{"usb0", "rndis0", "enp0s20f0u1"}
+	// Legacy interface names
+	interfaces := []string{"usb0", "rndis0"}
+
+	// B84: Also check predictable names (enxXXXXXXXXXXXX — MAC-based)
+	entries, _ := os.ReadDir("/sys/class/net")
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "enx") {
+			interfaces = append(interfaces, e.Name())
+		}
+	}
+
 	for _, iface := range interfaces {
 		if output, err := execWithTimeout(ctx, "ip", "addr", "show", iface); err == nil {
 			status.Interface = iface

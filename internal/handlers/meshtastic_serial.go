@@ -278,6 +278,7 @@ func (t *SerialTransport) DeviceAddress() string {
 // These devices respond on /dev/ttyACM* and /dev/ttyUSB* but are GPS receivers
 // managed by gpsd, not radio modems. (B68 fix)
 var gpsVIDPIDs = map[string]bool{
+	"1546:01a6": true, // u-blox 7 older variant (ACM)
 	"1546:01a7": true, // u-blox 7 (ACM)
 	"1546:01a8": true, // u-blox 8 (ACM)
 	"1546:01a9": true, // u-blox 9 (ACM)
@@ -286,26 +287,53 @@ var gpsVIDPIDs = map[string]bool{
 	"067b:2303": true, // Prolific PL2303 legacy (GPS adapters)
 }
 
-// isGPSDevice checks if a serial port belongs to a GPS receiver by VID:PID.
-// Exported at package level so iridium_driver.go can also use it. (B68)
-func isGPSDevice(port string) bool {
+// findUSBVIDPID walks up the sysfs tree from a tty device to find the USB
+// device's idVendor/idProduct. CDC-ACM devices (like u-blox GPS) have the
+// USB device node 2–3 levels above /sys/class/tty/ttyACMx/device, not 1.
+// Returns "vid:pid" or empty string if not found. (B68 fix)
+func findUSBVIDPID(port string) string {
 	devName := filepath.Base(port)
 	sysPath := fmt.Sprintf("/sys/class/tty/%s/device", devName)
 
-	vidData, err := os.ReadFile(filepath.Join(sysPath, "../idVendor"))
-	if err != nil {
+	// Walk up the sysfs tree looking for idVendor/idProduct.
+	// ttyUSB devices: 1 level up (../idVendor)
+	// ttyACM CDC-ACM: 2–3 levels up depending on hub topology
+	current := sysPath
+	for i := 0; i < 5; i++ {
+		current = filepath.Join(current, "..")
+		vidPath := filepath.Join(current, "idVendor")
+		pidPath := filepath.Join(current, "idProduct")
+
+		vidData, err := os.ReadFile(vidPath)
+		if err != nil {
+			continue
+		}
+		pidData, err := os.ReadFile(pidPath)
+		if err != nil {
+			continue
+		}
+
+		vid := strings.TrimSpace(string(vidData))
+		pid := strings.TrimSpace(string(pidData))
+		if vid != "" && pid != "" {
+			return fmt.Sprintf("%s:%s", vid, pid)
+		}
+	}
+	return ""
+}
+
+// isGPSDevice checks if a serial port belongs to a GPS receiver by VID:PID.
+// Walks up the sysfs tree to handle CDC-ACM devices. (B68 fix)
+func isGPSDevice(port string) bool {
+	vidpid := findUSBVIDPID(port)
+	if vidpid == "" {
 		return false
 	}
-	pidData, err := os.ReadFile(filepath.Join(sysPath, "../idProduct"))
-	if err != nil {
-		return false
+	if gpsVIDPIDs[vidpid] {
+		log.Printf("meshtastic: %s identified as GPS device (VID:PID=%s)", port, vidpid)
+		return true
 	}
-
-	vid := strings.TrimSpace(string(vidData))
-	pid := strings.TrimSpace(string(pidData))
-	vidpid := fmt.Sprintf("%s:%s", vid, pid)
-
-	return gpsVIDPIDs[vidpid]
+	return false
 }
 
 // isGPSClaimedPort checks if gpsd is configured to use a specific port.
@@ -336,6 +364,7 @@ func isExcludedFromRadioScan(port string) bool {
 		return true
 	}
 	if isGPSClaimedPort(port) {
+		log.Printf("meshtastic: %s claimed by gpsd, excluding from scan", port)
 		return true
 	}
 	return false

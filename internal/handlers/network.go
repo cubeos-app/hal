@@ -449,6 +449,20 @@ func (h *HALHandler) GetNetworkMode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// B84: Also check enx* interfaces (Android USB tethering with predictable names)
+	if !resp.WifiClient {
+		entries, _ := os.ReadDir("/sys/class/net")
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "enx") {
+				operstate, _ := os.ReadFile("/sys/class/net/" + e.Name() + "/operstate")
+				if strings.TrimSpace(string(operstate)) == "up" {
+					resp.WifiClient = true
+					break
+				}
+			}
+		}
+	}
+
 	// Check internet connectivity
 	checkIP := getDefaultInternetCheckIP()
 	_, err := execWithTimeout(r.Context(), "ping", "-c", "1", "-W", "2", checkIP)
