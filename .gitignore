@@ -1,7 +1,7 @@
 # Compiled binaries
-cubeos-hal
-cubeos-hal-arm64
-cubeos-hal-amd64
+/cubeos-hal
+/cubeos-hal-arm64
+/cubeos-hal-amd64
 *.exe
 
 # Go
