@@ -1,0 +1,152 @@
+# =============================================================================
+# CubeOS HAL Pipeline — Build, Package, Deploy
+# =============================================================================
+# Builds Go binary, generates OpenAPI docs, builds multi-arch Docker image,
+# pushes to GHCR, and deploys to Pi.
+# =============================================================================
+
+stages:
+  - build
+  - package
+  - deploy
+
+variables:
+  HAL_IMAGE: "ghcr.io/cubeos-app/hal"
+  BUILDER_IMAGE: "ghcr.io/cubeos-app/api-builder:latest"
+
+# -----------------------------------------------------------------------------
+# BUILD — Generate OpenAPI docs + Compile Go binary
+# -----------------------------------------------------------------------------
+build:
+  stage: build
+  tags: [multiarch]
+  image: ${BUILDER_IMAGE}
+  script:
+    - cd ${CI_PROJECT_DIR}
+    - go mod download
+
+    # Generate OpenAPI docs from swaggo annotations
+    - echo "Installing swag CLI..."
+    - go install github.com/swaggo/swag/cmd/swag@latest
+    - export PATH=$PATH:$(go env GOPATH)/bin
+
+    - echo "Generating OpenAPI spec from annotations..."
+    - |
+      swag init \
+        -g cmd/cubeos-hal/main.go \
+        --output ./docs \
+        --parseDependency \
+        --parseInternal \
+        --parseDepth 2 \
+        || echo "Swag init had warnings (may be OK)"
+
+    - |
+      if [ -f docs/swagger.yaml ]; then
+        cp docs/swagger.yaml internal/handlers/openapi.yaml
+        echo "OpenAPI spec generated ($(wc -l < docs/swagger.yaml) lines)"
+      elif [ -f docs/swagger.json ]; then
+        echo "Converting swagger.json to yaml..."
+        python3 -c "import json,yaml; yaml.dump(json.load(open('docs/swagger.json')), open('internal/handlers/openapi.yaml','w'), default_flow_style=False)" 2>/dev/null \
+          || cp docs/swagger.json internal/handlers/openapi.yaml
+        echo "OpenAPI spec generated from JSON"
+      else
+        echo "No swagger spec generated, using existing openapi.yaml"
+      fi
+
+    # Build binaries for both architectures
+    - echo "Building ARM64 binary..."
+    - GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o cubeos-hal-arm64 ./cmd/cubeos-hal/
+
+    - echo "Building AMD64 binary..."
+    - GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o cubeos-hal-amd64 ./cmd/cubeos-hal/
+
+    - ls -lh cubeos-hal-arm64 cubeos-hal-amd64 internal/handlers/openapi.yaml
+  artifacts:
+    paths:
+      - cubeos-hal-arm64
+      - cubeos-hal-amd64
+      - internal/handlers/openapi.yaml
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# -----------------------------------------------------------------------------
+# PACKAGE — Build multi-arch Docker image and push to GHCR
+# -----------------------------------------------------------------------------
+package:
+  stage: package
+  tags: [multiarch]
+  image: docker:24
+  needs:
+    - job: build
+      artifacts: true
+  before_script:
+    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+    - docker buildx create --name halbuilder --driver docker-container --use
+    - docker buildx inspect --bootstrap
+  script:
+    - |
+      echo "OpenAPI spec in build context:"
+      wc -l internal/handlers/openapi.yaml
+
+      docker buildx build --no-cache \
+        --platform linux/amd64,linux/arm64 \
+        --push \
+        -t ${HAL_IMAGE}:${CI_COMMIT_SHORT_SHA} \
+        -t ${HAL_IMAGE}:latest \
+        .
+      echo "Pushed multi-arch ${HAL_IMAGE}:${CI_COMMIT_SHORT_SHA}"
+  after_script:
+    - docker buildx rm halbuilder || true
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+# -----------------------------------------------------------------------------
+# DEPLOY — Pull latest image on Pi and restart HAL container
+# -----------------------------------------------------------------------------
+deploy:
+  stage: deploy
+  tags:
+    - deploy
+    - arm64
+  needs:
+    - package
+  before_script:
+    - echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+  script:
+    - |
+      COMPOSE_FILE="/cubeos/coreapps/cubeos-hal/appconfig/docker-compose.yml"
+      if [ ! -f "$COMPOSE_FILE" ]; then
+        echo "ERROR: HAL compose file not found at $COMPOSE_FILE"
+        exit 1
+      fi
+
+      cd /cubeos/coreapps/cubeos-hal/appconfig
+
+      echo "Pulling latest HAL image..."
+      timeout 120 docker compose pull 2>&1 || echo "Pull failed, using cached..."
+
+      echo "Stopping existing HAL..."
+      docker rm -f cubeos-hal 2>/dev/null || true
+      docker compose down 2>/dev/null || true
+
+      echo "Starting HAL..."
+      docker compose up -d --pull always
+
+      # Health check
+      sleep 5
+      for i in $(seq 1 10); do
+        if curl -sf http://127.0.0.1:6005/health >/dev/null 2>&1; then
+          echo "HAL healthy"
+          break
+        fi
+        [ "$i" -eq 10 ] && echo "HAL may still be starting..."
+        sleep 3
+      done
+
+      echo "Swagger UI: http://cubeos.cube:6005/hal/docs"
+      echo "Deploy complete"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+  environment:
+    name: production

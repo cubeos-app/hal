@@ -1,0 +1,24 @@
+# Compiled binaries
+cubeos-hal
+cubeos-hal-arm64
+cubeos-hal-amd64
+*.exe
+
+# Go
+vendor/
+*.test
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated swagger docs (rebuilt by CI)
+docs/
+
+# Session artifacts
+*HANDOVER*.md

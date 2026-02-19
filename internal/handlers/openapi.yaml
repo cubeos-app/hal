@@ -1,0 +1,113 @@
+openapi: 3.0.3
+info:
+  title: CubeOS HAL API
+  description: |
+    Hardware Abstraction Layer API for CubeOS.
+    
+    Provides unified access to Raspberry Pi hardware including:
+    - System: Temperature, throttling, EEPROM, services
+    - Power: Battery (X1202 UPS), RTC, watchdog
+    - Network: Interfaces, WiFi, Access Point, firewall
+    - VPN: WireGuard, OpenVPN, Tor
+    - Storage: Block devices, SMART, USB storage
+    - Communication: GPS, Cellular, Meshtastic, Iridium
+    - Peripherals: Camera, sensors, audio, GPIO, I2C, USB, Bluetooth
+    
+    This is a placeholder spec. Run `make docs` to generate from annotations.
+  version: 1.1.0
+  contact:
+    name: CubeOS Support
+    url: https://github.com/cubeos/cubeos-hal
+  license:
+    name: Apache 2.0
+    url: http://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://cubeos.cube:6005/hal
+    description: CubeOS HAL API
+
+tags:
+  - name: System
+    description: System operations, temperature, services
+  - name: Power
+    description: Battery, UPS, RTC, watchdog management
+  - name: Network
+    description: Network interfaces, WiFi, Access Point
+  - name: Firewall
+    description: Firewall rules, NAT, IP forwarding
+  - name: VPN
+    description: VPN connections (WireGuard, OpenVPN, Tor)
+  - name: Storage
+    description: Storage devices, SMART, usage
+  - name: USB
+    description: USB devices and storage
+  - name: Logs
+    description: System logs and support bundle
+  - name: GPS
+    description: GPS/GNSS positioning
+  - name: Cellular
+    description: Cellular modems and Android tethering
+  - name: Meshtastic
+    description: LoRa mesh networking
+  - name: Iridium
+    description: Satellite communication (SBD)
+  - name: Camera
+    description: Pi Camera and USB webcam
+  - name: Sensors
+    description: Temperature sensors (1-Wire, BME280)
+  - name: Audio
+    description: ALSA audio devices
+  - name: GPIO
+    description: GPIO pin control
+  - name: I2C
+    description: I2C bus operations
+  - name: Bluetooth
+    description: Bluetooth devices
+  - name: Mounts
+    description: Network mounts (SMB/NFS)
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Returns HAL service health status
+      tags: [System]
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: healthy
+                  service:
+                    type: string
+                    example: cubeos-hal
+                  version:
+                    type: string
+                    example: 1.1.0
+
+  /docs:
+    get:
+      summary: Swagger UI
+      description: Interactive API documentation
+      tags: [Documentation]
+      responses:
+        '200':
+          description: Swagger UI HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+
+# NOTE: This is a placeholder file.
+# 
+# To generate the full OpenAPI spec from handler annotations:
+#   make docs
+#
+# This will parse all @Summary, @Description, @Tags, @Param, @Success, 
+# @Failure, and @Router annotations from the handler files and generate
+# a complete specification.
