@@ -443,6 +443,13 @@ func (h *HALHandler) GetAndroidTetheringStatus(w http.ResponseWriter, r *http.Re
 }
 
 // EnableAndroidTethering enables Android USB tethering.
+// @Summary Enable Android USB tethering
+// @Description Requests a DHCP lease on the detected Android tethering interface
+// @Tags Cellular
+// @Produce json
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
 // @Router /cellular/android/enable [post]
 func (h *HALHandler) EnableAndroidTethering(w http.ResponseWriter, r *http.Request) {
 	status := h.checkAndroidTethering(r.Context())
@@ -450,13 +457,21 @@ func (h *HALHandler) EnableAndroidTethering(w http.ResponseWriter, r *http.Reque
 		errorResponse(w, http.StatusBadRequest, "no Android device detected")
 		return
 	}
-	// B84: Use nsenter to run dhclient in host mount namespace
-	// HAL runs in Alpine container — dhclient only exists on the host
-	if _, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--", "dhclient", status.Interface); err != nil {
-		log.Printf("cellular: dhclient failed on %s: %v", status.Interface, err)
+
+	// B96: Request DHCP lease via nsenter (host mount+network namespace).
+	// Try dhclient first, fall back to dhcpcd — matches RequestDHCP() pattern.
+	// dhclient requires isc-dhcp-client on the host (B87 fix in golden base).
+	_, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--", "dhclient", status.Interface)
+	if err != nil {
+		log.Printf("cellular: dhclient failed on %s (%v), trying dhcpcd", status.Interface, err)
+		_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--", "dhcpcd", status.Interface)
+	}
+	if err != nil {
+		log.Printf("cellular: all DHCP clients failed on %s: %v", status.Interface, err)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("DHCP", err))
 		return
 	}
+
 	successResponse(w, "Android tethering enabled on "+status.Interface)
 }
 

@@ -287,20 +287,39 @@ var gpsVIDPIDs = map[string]bool{
 	"067b:2303": true, // Prolific PL2303 legacy (GPS adapters)
 }
 
+// resolveSysfsDevice resolves the sysfs "device" symlink for a tty port.
+// /sys/class/tty/ttyACM0/device is a symlink to the actual device directory
+// in /sys/devices/... — filepath.Join(path, "..") resolves ".." lexically,
+// which walks up the LINK path, not the TARGET path. We must resolve the
+// symlink first so that ".." navigation walks the real sysfs tree. (B68 fix)
+func resolveSysfsDevice(port string) (string, error) {
+	devName := filepath.Base(port)
+	sysPath := fmt.Sprintf("/sys/class/tty/%s/device", devName)
+
+	resolved, err := filepath.EvalSymlinks(sysPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve sysfs symlink for %s: %w", port, err)
+	}
+	return resolved, nil
+}
+
 // findUSBVIDPID walks up the sysfs tree from a tty device to find the USB
 // device's idVendor/idProduct. CDC-ACM devices (like u-blox GPS) have the
 // USB device node 2–3 levels above /sys/class/tty/ttyACMx/device, not 1.
 // Returns "vid:pid" or empty string if not found. (B68 fix)
 func findUSBVIDPID(port string) string {
-	devName := filepath.Base(port)
-	sysPath := fmt.Sprintf("/sys/class/tty/%s/device", devName)
+	// B68: Resolve the symlink FIRST so that filepath.Join(current, "..")
+	// walks the real sysfs tree, not the lexical link path.
+	current, err := resolveSysfsDevice(port)
+	if err != nil {
+		return ""
+	}
 
 	// Walk up the sysfs tree looking for idVendor/idProduct.
 	// ttyUSB devices: 1 level up (../idVendor)
 	// ttyACM CDC-ACM: 2–3 levels up depending on hub topology
-	current := sysPath
 	for i := 0; i < 5; i++ {
-		current = filepath.Join(current, "..")
+		current = filepath.Dir(current) // B68: use Dir() instead of Join(current, "..")
 		vidPath := filepath.Join(current, "idVendor")
 		pidPath := filepath.Join(current, "idProduct")
 
@@ -428,6 +447,7 @@ func findSerialCandidates() []string {
 }
 
 // isMeshtasticVIDPID checks if a serial port's USB VID:PID matches known Meshtastic devices.
+// B68: Uses findUSBVIDPID() with proper symlink resolution instead of manual path construction.
 func isMeshtasticVIDPID(port string) bool {
 	// Known Meshtastic VID:PID pairs
 	knownDevices := map[string]bool{
@@ -439,27 +459,7 @@ func isMeshtasticVIDPID(port string) bool {
 		"1915:520f": true, // Nordic nRF52840 (RAK, T-Echo)
 	}
 
-	// Extract device name from port path
-	devName := filepath.Base(port)
-	sysPath := fmt.Sprintf("/sys/class/tty/%s/device", devName)
-
-	// Read VID and PID from sysfs
-	vidPath := filepath.Join(sysPath, "../idVendor")
-	pidPath := filepath.Join(sysPath, "../idProduct")
-
-	vidData, err := os.ReadFile(vidPath)
-	if err != nil {
-		return false
-	}
-	pidData, err := os.ReadFile(pidPath)
-	if err != nil {
-		return false
-	}
-
-	vid := strings.TrimSpace(string(vidData))
-	pid := strings.TrimSpace(string(pidData))
-	vidpid := fmt.Sprintf("%s:%s", vid, pid)
-
+	vidpid := findUSBVIDPID(port)
 	return knownDevices[vidpid]
 }
 
@@ -485,15 +485,16 @@ func scanMeshtasticPorts(ctx context.Context) []MeshtasticDeviceInfo {
 			TransportType: "serial",
 		}
 
-		// Get VID:PID
-		devName := filepath.Base(port)
-		sysPath := fmt.Sprintf("/sys/class/tty/%s/device", devName)
-
-		if vidData, err := os.ReadFile(filepath.Join(sysPath, "../idVendor")); err == nil {
-			info.VID = strings.TrimSpace(string(vidData))
-		}
-		if pidData, err := os.ReadFile(filepath.Join(sysPath, "../idProduct")); err == nil {
-			info.PID = strings.TrimSpace(string(pidData))
+		// B68: Use findUSBVIDPID() with proper symlink resolution to get VID:PID.
+		// Previously used filepath.Join(sysPath, "../idVendor") which failed on
+		// CDC-ACM symlinks — same bug as findUSBVIDPID() had.
+		vidpid := findUSBVIDPID(port)
+		if vidpid != "" {
+			parts := strings.SplitN(vidpid, ":", 2)
+			if len(parts) == 2 {
+				info.VID = parts[0]
+				info.PID = parts[1]
+			}
 		}
 
 		// Check if VID:PID matches known Meshtastic devices
