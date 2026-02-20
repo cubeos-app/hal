@@ -383,10 +383,29 @@ func (h *HALHandler) EnableNAT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// B117: Also MASQUERADE Docker Swarm containers on docker_gwbridge.
+	// Without this, containers on overlay networks (172.16.1.0/24) cannot
+	// reach the internet even when the host can — the AP subnet rule only
+	// covers WiFi clients (10.42.24.0/24), not container traffic.
+	// This bug persisted through Alpha.21, .22, .23, and .24.
+	dockerGwSubnet := detectDockerGwBridgeSubnet(r.Context())
+	dockerGwNATApplied := false
+	if dockerGwSubnet != "" && dockerGwSubnet != req.Source {
+		gwArgs := []string{"-t", "nat", "-A", "POSTROUTING", "-s", dockerGwSubnet, "-o", req.OutInterface, "-j", "MASQUERADE"}
+		if _, gwErr := execWithTimeout(r.Context(), "iptables", gwArgs...); gwErr != nil {
+			log.Printf("EnableNAT: docker_gwbridge MASQUERADE failed: %v", gwErr)
+		} else {
+			log.Printf("EnableNAT: docker_gwbridge NAT: %s via %s", dockerGwSubnet, req.OutInterface)
+			dockerGwNATApplied = true
+		}
+	}
+
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"success":       true,
-		"source":        req.Source,
-		"out_interface": req.OutInterface,
+		"success":              true,
+		"source":               req.Source,
+		"out_interface":        req.OutInterface,
+		"docker_gw_nat":        dockerGwNATApplied,
+		"docker_gw_subnet":     dockerGwSubnet,
 	})
 }
 
@@ -585,6 +604,23 @@ func (h *HALHandler) ResetFirewall(w http.ResponseWriter, r *http.Request) {
 }
 
 // Helper functions
+
+// detectDockerGwBridgeSubnet discovers the docker_gwbridge network subnet.
+// Docker Swarm creates this bridge for container-to-host communication.
+// Returns empty string if not found (e.g. Swarm not initialized).
+func detectDockerGwBridgeSubnet(ctx context.Context) string {
+	output, err := execWithTimeout(ctx, "docker", "network", "inspect", "docker_gwbridge",
+		"--format", "{{range .IPAM.Config}}{{.Subnet}}{{end}}")
+	if err != nil {
+		return ""
+	}
+	subnet := strings.TrimSpace(output)
+	// Basic CIDR validation
+	if subnet != "" && strings.Contains(subnet, "/") {
+		return subnet
+	}
+	return ""
+}
 
 func countIptablesRules(output string) int {
 	count := 0
