@@ -608,16 +608,35 @@ func (h *HALHandler) ResetFirewall(w http.ResponseWriter, r *http.Request) {
 // detectDockerGwBridgeSubnet discovers the docker_gwbridge network subnet.
 // Docker Swarm creates this bridge for container-to-host communication.
 // Returns empty string if not found (e.g. Swarm not initialized).
+//
+// Uses 'ip' command rather than 'docker' CLI because HAL runs in a container
+// with host network namespace but without the Docker socket or CLI.
 func detectDockerGwBridgeSubnet(ctx context.Context) string {
-	output, err := execWithTimeout(ctx, "docker", "network", "inspect", "docker_gwbridge",
-		"--format", "{{range .IPAM.Config}}{{.Subnet}}{{end}}")
+	// ip -4 addr show docker_gwbridge outputs lines like:
+	//     inet 172.16.1.1/24 brd 172.16.1.255 scope global docker_gwbridge
+	output, err := execWithTimeout(ctx, "ip", "-4", "addr", "show", "docker_gwbridge")
 	if err != nil {
 		return ""
 	}
-	subnet := strings.TrimSpace(output)
-	// Basic CIDR validation
-	if subnet != "" && strings.Contains(subnet, "/") {
-		return subnet
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "inet ") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				// fields[1] is "172.16.1.1/24" — this is the host IP on the bridge
+				// Convert to network CIDR by replacing host bits
+				addr := fields[1] // e.g. "172.16.1.1/24"
+				parts := strings.SplitN(addr, "/", 2)
+				if len(parts) == 2 {
+					// Parse IP octets to build network address
+					octets := strings.Split(parts[0], ".")
+					if len(octets) == 4 {
+						// For /24, zero the last octet to get network CIDR
+						return octets[0] + "." + octets[1] + "." + octets[2] + ".0/" + parts[1]
+					}
+				}
+			}
+		}
 	}
 	return ""
 }
