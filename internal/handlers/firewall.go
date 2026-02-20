@@ -383,29 +383,29 @@ func (h *HALHandler) EnableNAT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// B117: Also MASQUERADE Docker Swarm containers on docker_gwbridge.
-	// Without this, containers on overlay networks (172.16.1.0/24) cannot
-	// reach the internet even when the host can — the AP subnet rule only
-	// covers WiFi clients (10.42.24.0/24), not container traffic.
-	// This bug persisted through Alpha.21, .22, .23, and .24.
-	dockerGwSubnet := detectDockerGwBridgeSubnet(r.Context())
-	dockerGwNATApplied := false
-	if dockerGwSubnet != "" && dockerGwSubnet != req.Source {
-		gwArgs := []string{"-t", "nat", "-A", "POSTROUTING", "-s", dockerGwSubnet, "-o", req.OutInterface, "-j", "MASQUERADE"}
+	// B117: Also MASQUERADE Docker bridge subnets (gwbridge, docker0, user bridges).
+	// Without this, containers cannot reach the internet — the AP subnet rule
+	// only covers WiFi clients (10.42.24.0/24), not container traffic.
+	dockerSubnets := detectDockerBridgeSubnets(r.Context())
+	var dockerNATApplied []string
+	for _, subnet := range dockerSubnets {
+		if subnet == req.Source {
+			continue // Already covered by the primary rule
+		}
+		gwArgs := []string{"-t", "nat", "-A", "POSTROUTING", "-s", subnet, "-o", req.OutInterface, "-j", "MASQUERADE"}
 		if _, gwErr := execWithTimeout(r.Context(), "iptables", gwArgs...); gwErr != nil {
-			log.Printf("EnableNAT: docker_gwbridge MASQUERADE failed: %v", gwErr)
+			log.Printf("EnableNAT: Docker bridge MASQUERADE failed for %s: %v", subnet, gwErr)
 		} else {
-			log.Printf("EnableNAT: docker_gwbridge NAT: %s via %s", dockerGwSubnet, req.OutInterface)
-			dockerGwNATApplied = true
+			log.Printf("EnableNAT: Docker bridge NAT: %s via %s", subnet, req.OutInterface)
+			dockerNATApplied = append(dockerNATApplied, subnet)
 		}
 	}
 
 	jsonResponse(w, http.StatusOK, map[string]interface{}{
-		"success":              true,
-		"source":               req.Source,
-		"out_interface":        req.OutInterface,
-		"docker_gw_nat":        dockerGwNATApplied,
-		"docker_gw_subnet":     dockerGwSubnet,
+		"success":           true,
+		"source":            req.Source,
+		"out_interface":     req.OutInterface,
+		"docker_bridge_nat": dockerNATApplied,
 	})
 }
 
@@ -605,16 +605,53 @@ func (h *HALHandler) ResetFirewall(w http.ResponseWriter, r *http.Request) {
 
 // Helper functions
 
-// detectDockerGwBridgeSubnet discovers the docker_gwbridge network subnet.
-// Docker Swarm creates this bridge for container-to-host communication.
-// Returns empty string if not found (e.g. Swarm not initialized).
+// detectDockerBridgeSubnets discovers all Docker bridge network subnets.
+// Returns a slice of CIDR strings (e.g. ["172.16.1.0/24", "172.17.0.0/16"]).
+//
+// Docker creates several bridges:
+//   - docker0: default bridge for standalone containers
+//   - docker_gwbridge: Swarm overlay → host communication
+//   - br-*: user-defined bridge networks
 //
 // Uses 'ip' command rather than 'docker' CLI because HAL runs in a container
 // with host network namespace but without the Docker socket or CLI.
-func detectDockerGwBridgeSubnet(ctx context.Context) string {
-	// ip -4 addr show docker_gwbridge outputs lines like:
-	//     inet 172.16.1.1/24 brd 172.16.1.255 scope global docker_gwbridge
-	output, err := execWithTimeout(ctx, "ip", "-4", "addr", "show", "docker_gwbridge")
+func detectDockerBridgeSubnets(ctx context.Context) []string {
+	// Well-known Docker bridge interfaces
+	bridges := []string{"docker_gwbridge", "docker0"}
+
+	// Also discover br-* interfaces (user-defined Docker networks)
+	output, err := execWithTimeout(ctx, "ip", "-4", "-o", "addr", "show")
+	if err == nil {
+		for _, line := range strings.Split(output, "\n") {
+			fields := strings.Fields(line)
+			// Format: "N: iface    inet CIDR ..."
+			if len(fields) >= 4 {
+				iface := strings.TrimRight(fields[1], ":")
+				if strings.HasPrefix(iface, "br-") {
+					bridges = append(bridges, iface)
+				}
+			}
+		}
+	}
+
+	var subnets []string
+	seen := make(map[string]bool)
+
+	for _, bridge := range bridges {
+		subnet := detectBridgeSubnet(ctx, bridge)
+		if subnet != "" && !seen[subnet] {
+			seen[subnet] = true
+			subnets = append(subnets, subnet)
+		}
+	}
+
+	return subnets
+}
+
+// detectBridgeSubnet returns the CIDR for a single bridge interface.
+// Returns empty string if the interface doesn't exist or has no IPv4 address.
+func detectBridgeSubnet(ctx context.Context, iface string) string {
+	output, err := execWithTimeout(ctx, "ip", "-4", "addr", "show", iface)
 	if err != nil {
 		return ""
 	}
@@ -623,22 +660,37 @@ func detectDockerGwBridgeSubnet(ctx context.Context) string {
 		if strings.HasPrefix(line, "inet ") {
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
-				// fields[1] is "172.16.1.1/24" — this is the host IP on the bridge
-				// Convert to network CIDR by replacing host bits
-				addr := fields[1] // e.g. "172.16.1.1/24"
-				parts := strings.SplitN(addr, "/", 2)
-				if len(parts) == 2 {
-					// Parse IP octets to build network address
-					octets := strings.Split(parts[0], ".")
-					if len(octets) == 4 {
-						// For /24, zero the last octet to get network CIDR
-						return octets[0] + "." + octets[1] + "." + octets[2] + ".0/" + parts[1]
-					}
-				}
+				addr := fields[1] // e.g. "172.16.1.1/24" or "172.17.0.1/16"
+				return addrToCIDR(addr)
 			}
 		}
 	}
 	return ""
+}
+
+// addrToCIDR converts a host address with prefix (e.g. "172.17.0.1/16") to
+// a network CIDR (e.g. "172.17.0.0/16") by zeroing host bits based on prefix length.
+func addrToCIDR(addr string) string {
+	parts := strings.SplitN(addr, "/", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	octets := strings.Split(parts[0], ".")
+	if len(octets) != 4 {
+		return ""
+	}
+	prefix := parts[1]
+	switch {
+	case prefix == "8":
+		return octets[0] + ".0.0.0/8"
+	case prefix == "16":
+		return octets[0] + "." + octets[1] + ".0.0/16"
+	case prefix == "24":
+		return octets[0] + "." + octets[1] + "." + octets[2] + ".0/24"
+	default:
+		// For non-standard prefixes, zero the last octet as a safe default
+		return octets[0] + "." + octets[1] + "." + octets[2] + ".0/" + prefix
+	}
 }
 
 func countIptablesRules(output string) int {
