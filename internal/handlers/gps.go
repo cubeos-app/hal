@@ -152,6 +152,23 @@ func (h *HALHandler) GetGPSPosition(w http.ResponseWriter, r *http.Request) {
 // Helper Functions
 // ============================================================================
 
+// knownGPSVIDPIDs maps USB VID:PID pairs to human-readable names for known GPS receivers.
+// B103: Used by scanGPSDevices() for positive identification — only devices matching
+// these VID:PIDs (or built-in serial ports) are reported as GPS devices.
+var knownGPSVIDPIDs = map[string]string{
+	"1546:01a6": "u-blox 7 (older variant)",
+	"1546:01a7": "u-blox 7 - GPS/GNSS Receiver",
+	"1546:01a8": "u-blox 8 - GPS/GNSS Receiver",
+	"1546:01a9": "u-blox 9 - GPS/GNSS Receiver",
+	"1546:0502": "u-blox M8 (generic)",
+	"067b:2303": "Prolific PL2303 (GPS adapter)",
+	"067b:23a3": "Prolific PL2303 (GPS adapter)",
+	"10c4:ea60": "SiLabs CP210x (GPS adapter)", // Note: also used by some Meshtastic — isMeshtasticVIDPID() takes priority
+	"0403:6001": "FTDI FT232R (GPS adapter)",
+	"091e:0003": "Garmin GPS 18x",
+	"1199:68a2": "Sierra Wireless GPS",
+}
+
 func (h *HALHandler) scanGPSDevices() []GPSDevice {
 	var devices []GPSDevice
 
@@ -163,33 +180,67 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 	}
 
 	for _, port := range ports {
-		if _, err := os.Stat(port); err == nil {
+		if _, err := os.Stat(port); err != nil {
+			continue
+		}
+
+		isUSBDevice := strings.Contains(port, "USB") || strings.Contains(port, "ACM")
+
+		// B103: For USB/ACM devices, use VID:PID to positively identify GPS receivers
+		// and exclude known radio devices (Meshtastic, Iridium). Without this check,
+		// any serial device (including Meshtastic radios with onboard GPS that output
+		// NMEA) would appear in the GPS device list.
+		if isUSBDevice {
+			// Exclude known Meshtastic/radio devices first (inverse of B68)
+			if isMeshtasticVIDPID(port) {
+				log.Printf("gps: %s identified as Meshtastic radio, excluding from GPS scan", port)
+				continue
+			}
+
+			// Check VID:PID against known GPS devices
+			vidpid := findUSBVIDPID(port)
+			gpsName, isKnownGPS := knownGPSVIDPIDs[vidpid]
+
+			if !isKnownGPS {
+				// Unknown USB device — don't claim it's a GPS receiver.
+				// Log for diagnostics but skip silently.
+				if vidpid != "" {
+					log.Printf("gps: %s has unknown VID:PID=%s, skipping", port, vidpid)
+				}
+				continue
+			}
+
+			// Known GPS device — read USB product strings for display
 			device := GPSDevice{
 				Port:     port,
+				Name:     gpsName,
 				BaudRate: 9600,
 				Active:   true,
 			}
 
-			// Try to get USB device info — devName comes from hardcoded ports list (safe)
-			if strings.Contains(port, "USB") || strings.Contains(port, "ACM") {
-				devName := strings.TrimPrefix(port, "/dev/")
-				sysPath := "/sys/class/tty/" + devName + "/device"
-
-				if vendorData, err := os.ReadFile(sysPath + "/../manufacturer"); err == nil {
-					device.Vendor = strings.TrimSpace(string(vendorData))
-				}
-				if productData, err := os.ReadFile(sysPath + "/../product"); err == nil {
-					device.Product = strings.TrimSpace(string(productData))
-					device.Name = device.Product
-				}
+			devName := strings.TrimPrefix(port, "/dev/")
+			sysPath := "/sys/class/tty/" + devName + "/device"
+			if vendorData, err := os.ReadFile(sysPath + "/../manufacturer"); err == nil {
+				device.Vendor = strings.TrimSpace(string(vendorData))
+			}
+			if productData, err := os.ReadFile(sysPath + "/../product"); err == nil {
+				device.Product = strings.TrimSpace(string(productData))
+				device.Name = device.Product // Prefer USB product string over table name
 			}
 
-			if device.Name == "" {
-				device.Name = "GPS Device"
-			}
-
+			log.Printf("gps: %s identified as GPS device (VID:PID=%s, name=%s)", port, vidpid, device.Name)
 			devices = append(devices, device)
+			continue
 		}
+
+		// Built-in serial ports (serial0, ttyAMA0) — typically GPIO-connected GPS modules.
+		// No VID:PID filtering possible; include unconditionally.
+		devices = append(devices, GPSDevice{
+			Port:     port,
+			Name:     "GPS Device",
+			BaudRate: 9600,
+			Active:   true,
+		})
 	}
 
 	return devices
