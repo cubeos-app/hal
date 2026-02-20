@@ -989,9 +989,19 @@ func (h *HALHandler) GetAPClients(w http.ResponseWriter, r *http.Request) {
 		if !hostapdCLILoggedOnce.Swap(true) {
 			log.Printf("GetAPClients: hostapd_cli failed: %v, falling back to DHCP leases (suppressing future logs)", err)
 		}
-		// Fall back: report DHCP clients on the AP subnet as connected
+
+		// B119: Cross-reference DHCP leases with ARP table to exclude
+		// disconnected clients. DHCP leases persist for hours, but ARP
+		// entries for disconnected WiFi clients transition to FAILED within
+		// seconds. Only include leases with REACHABLE/STALE/DELAY ARP state.
+		reachableMACs := getReachableARPMacs(r.Context(), "wlan0")
+
 		for _, lease := range leases {
 			if strings.HasPrefix(lease.ip, "10.42.24.") && lease.ip != "10.42.24.1" {
+				// Only include if ARP says this client is still reachable
+				if _, reachable := reachableMACs[strings.ToLower(lease.mac)]; !reachable {
+					continue
+				}
 				clients = append(clients, map[string]interface{}{
 					"mac_address": strings.ToUpper(lease.mac),
 					"ip_address":  lease.ip,
@@ -1058,6 +1068,49 @@ func loadDHCPLeases() map[string]dhcpLease {
 	}
 
 	return leases
+}
+
+// getReachableARPMacs returns a set of lowercase MAC addresses that have
+// REACHABLE, STALE, or DELAY ARP state on the given interface.
+// Clients that have disconnected from WiFi transition to FAILED within seconds,
+// so this effectively filters out stale DHCP leases from disconnected clients.
+func getReachableARPMacs(ctx context.Context, iface string) map[string]bool {
+	macs := make(map[string]bool)
+
+	// "ip neigh show dev wlan0" output format:
+	//   10.42.24.123 lladdr 28:a0:6b:9d:e9:28 REACHABLE
+	//   10.42.24.124 FAILED
+	output, err := execWithTimeout(ctx, "ip", "neigh", "show", "dev", iface)
+	if err != nil {
+		return macs
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Skip entries in FAILED or INCOMPLETE state — these are disconnected
+		upper := strings.ToUpper(line)
+		if strings.Contains(upper, "FAILED") || strings.Contains(upper, "INCOMPLETE") {
+			continue
+		}
+
+		// Extract MAC from "lladdr" field
+		fields := strings.Fields(line)
+		for i, f := range fields {
+			if f == "lladdr" && i+1 < len(fields) {
+				mac := strings.ToLower(fields[i+1])
+				if len(mac) == 17 && strings.Count(mac, ":") == 5 {
+					macs[mac] = true
+				}
+				break
+			}
+		}
+	}
+
+	return macs
 }
 
 // DisconnectAPClient disconnects a client from the AP
