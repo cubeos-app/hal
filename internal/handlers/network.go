@@ -1077,10 +1077,13 @@ func loadDHCPLeases() map[string]dhcpLease {
 func getReachableARPMacs(ctx context.Context, iface string) map[string]bool {
 	macs := make(map[string]bool)
 
-	// "ip neigh show dev wlan0" output format:
+	// "ip -4 neigh show dev wlan0" output format (IPv4 only):
 	//   10.42.24.123 lladdr 28:a0:6b:9d:e9:28 REACHABLE
 	//   10.42.24.124 FAILED
-	output, err := execWithTimeout(ctx, "ip", "neigh", "show", "dev", iface)
+	// Note: -4 is critical — without it, IPv6 link-local entries (fe80::...)
+	// may have STALE state with the client's MAC, causing disconnected clients
+	// to appear reachable even when their IPv4 entry shows FAILED.
+	output, err := execWithTimeout(ctx, "ip", "-4", "neigh", "show", "dev", iface)
 	if err != nil {
 		return macs
 	}
