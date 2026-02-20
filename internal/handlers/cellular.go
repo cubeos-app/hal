@@ -458,10 +458,22 @@ func (h *HALHandler) EnableAndroidTethering(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// B96b: Bring the interface UP before requesting DHCP.
+	// Android tethering interfaces (enx*) start with qdisc noop / state DOWN —
+	// DHCP clients silently fail on a DOWN interface.
+	_, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+		"ip", "link", "set", status.Interface, "up")
+	if err != nil {
+		log.Printf("cellular: failed to bring up %s: %v", status.Interface, err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("bring interface up", err))
+		return
+	}
+	time.Sleep(2 * time.Second) // Let link settle before DHCP
+
 	// B96: Request DHCP lease via nsenter (host mount+network namespace).
 	// Try dhclient first, fall back to dhcpcd — matches RequestDHCP() pattern.
 	// dhclient requires isc-dhcp-client on the host (B87 fix in golden base).
-	_, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--", "dhclient", status.Interface)
+	_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--", "dhclient", status.Interface)
 	if err != nil {
 		log.Printf("cellular: dhclient failed on %s (%v), trying dhcpcd", status.Interface, err)
 		_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--", "dhcpcd", status.Interface)

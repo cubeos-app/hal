@@ -1394,22 +1394,33 @@ func (h *HALHandler) WriteNetplan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Apply: networkctl reload picks up the new netplan without dropping connections
+	// B112: Generate networkd .network files from netplan YAML.
+	// Without this, networkctl reload reads stale /run/systemd/network/*.network files
+	// that don't reflect the new netplan YAML (e.g., DHCP config missing after mode switch).
+	_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "--",
+		"netplan", "generate")
+	if err != nil {
+		log.Printf("WriteNetplan: netplan generate failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("netplan generate", err))
+		return
+	}
+
+	// Reload networkd to pick up the freshly generated .network files
 	_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
 		"networkctl", "reload")
 	if err != nil {
 		log.Printf("WriteNetplan: networkctl reload failed: %v", err)
-		// Non-fatal — netplan is written, will take effect on reboot
+		// Non-fatal — netplan is written + generated, will take effect on reboot
 	}
 
-	// Optionally reconfigure a specific interface (e.g., wlan1 for ONLINE_WIFI)
+	// Optionally reconfigure a specific interface (e.g., eth0 for ONLINE_ETH, wlan1 for ONLINE_WIFI)
 	if req.ReconfigureIface != "" {
 		time.Sleep(time.Second) // Let networkd process the reload
 		_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
 			"networkctl", "reconfigure", req.ReconfigureIface)
 		if err != nil {
 			log.Printf("WriteNetplan: reconfigure %s failed: %v", req.ReconfigureIface, err)
-			// Non-fatal — netplan is written
+			// Non-fatal — netplan is written + generated
 		}
 	}
 
