@@ -376,11 +376,19 @@ func (h *HALHandler) EnableNAT(w http.ResponseWriter, r *http.Request) {
 	}
 
 	args := []string{"-t", "nat", "-A", "POSTROUTING", "-s", req.Source, "-o", req.OutInterface, "-j", "MASQUERADE"}
-	_, err := execWithTimeout(r.Context(), "iptables", args...)
-	if err != nil {
-		log.Printf("EnableNAT: %v", err)
-		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("enable NAT", err))
-		return
+
+	// B2: Check if rule already exists before appending (idempotency guard).
+	// Since DisableNAT now uses targeted deletion instead of flush, duplicate
+	// rules would accumulate without this check.
+	checkArgs := []string{"-t", "nat", "-C", "POSTROUTING", "-s", req.Source, "-o", req.OutInterface, "-j", "MASQUERADE"}
+	if _, checkErr := execWithTimeout(r.Context(), "iptables", checkArgs...); checkErr == nil {
+		log.Printf("EnableNAT: primary rule already exists for %s via %s, skipping", req.Source, req.OutInterface)
+	} else {
+		if _, err := execWithTimeout(r.Context(), "iptables", args...); err != nil {
+			log.Printf("EnableNAT: %v", err)
+			errorResponse(w, http.StatusInternalServerError, sanitizeExecError("enable NAT", err))
+			return
+		}
 	}
 
 	// B117: Also MASQUERADE Docker bridge subnets (gwbridge, docker0, user bridges).
@@ -393,6 +401,13 @@ func (h *HALHandler) EnableNAT(w http.ResponseWriter, r *http.Request) {
 			continue // Already covered by the primary rule
 		}
 		gwArgs := []string{"-t", "nat", "-A", "POSTROUTING", "-s", subnet, "-o", req.OutInterface, "-j", "MASQUERADE"}
+		// B2: Check before append (same idempotency guard as primary rule)
+		gwCheck := []string{"-t", "nat", "-C", "POSTROUTING", "-s", subnet, "-o", req.OutInterface, "-j", "MASQUERADE"}
+		if _, checkErr := execWithTimeout(r.Context(), "iptables", gwCheck...); checkErr == nil {
+			log.Printf("EnableNAT: Docker bridge rule already exists for %s, skipping", subnet)
+			dockerNATApplied = append(dockerNATApplied, subnet)
+			continue
+		}
 		if _, gwErr := execWithTimeout(r.Context(), "iptables", gwArgs...); gwErr != nil {
 			log.Printf("EnableNAT: Docker bridge MASQUERADE failed for %s: %v", subnet, gwErr)
 		} else {
@@ -411,21 +426,87 @@ func (h *HALHandler) EnableNAT(w http.ResponseWriter, r *http.Request) {
 
 // DisableNAT disables NAT/masquerading
 // @Summary Disable NAT
-// @Description Disables NAT masquerading by flushing the POSTROUTING chain
+// @Description Disables CubeOS NAT masquerading by removing specific MASQUERADE rules. Scans POSTROUTING for rules matching the CubeOS subnet and Docker bridge subnets, using targeted deletion (-D) to preserve Docker's own NAT rules.
 // @Tags Firewall
+// @Accept json
 // @Produce json
+// @Param request body object false "NAT source to clean up" example({"source":"10.42.24.0/24"})
 // @Success 200 {object} SuccessResponse
 // @Failure 500 {object} ErrorResponse
 // @Router /firewall/nat/disable [post]
 func (h *HALHandler) DisableNAT(w http.ResponseWriter, r *http.Request) {
-	_, err := execWithTimeout(r.Context(), "iptables", "-t", "nat", "-F", "POSTROUTING")
+	r = limitBody(r, 1<<20) // 1MB
+
+	var req struct {
+		Source string `json:"source"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		req.Source = getDefaultNATSource()
+	}
+	if req.Source == "" {
+		req.Source = getDefaultNATSource()
+	}
+
+	// Collect all subnets that CubeOS may have added NAT rules for:
+	// 1. The AP subnet (10.42.24.0/24)
+	// 2. Docker bridge subnets (added by EnableNAT for container internet)
+	cubeosSources := map[string]bool{req.Source: true}
+	for _, subnet := range detectDockerBridgeSubnets(r.Context()) {
+		cubeosSources[subnet] = true
+	}
+
+	// Parse current POSTROUTING rules and find MASQUERADE rules matching
+	// our subnets. Delete by exact rule specification to avoid touching
+	// Docker's own rules (which use different source subnets).
+	output, err := execWithTimeout(r.Context(), "iptables", "-t", "nat", "-S", "POSTROUTING")
 	if err != nil {
-		log.Printf("DisableNAT: %v", err)
-		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("disable NAT", err))
+		log.Printf("DisableNAT: failed to list POSTROUTING rules: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("list NAT rules", err))
 		return
 	}
 
-	successResponse(w, "NAT disabled")
+	var removed []string
+	// Each line from -S looks like:
+	// -A POSTROUTING -s 10.42.24.0/24 -o eth0 -j MASQUERADE
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.Contains(line, "MASQUERADE") {
+			continue
+		}
+		if !strings.HasPrefix(line, "-A POSTROUTING") {
+			continue
+		}
+
+		// Check if the source matches any CubeOS-managed subnet
+		matchesCubeOS := false
+		for subnet := range cubeosSources {
+			if strings.Contains(line, "-s "+subnet) {
+				matchesCubeOS = true
+				break
+			}
+		}
+		if !matchesCubeOS {
+			continue
+		}
+
+		// Convert -A to -D for deletion
+		deleteRule := strings.Replace(line, "-A POSTROUTING", "-D POSTROUTING", 1)
+		deleteArgs := append([]string{"-t", "nat"}, strings.Fields(deleteRule)...)
+		if _, delErr := execWithTimeout(r.Context(), "iptables", deleteArgs...); delErr != nil {
+			log.Printf("DisableNAT: failed to remove rule %q: %v", line, delErr)
+		} else {
+			removed = append(removed, line)
+		}
+	}
+
+	log.Printf("DisableNAT: removed %d CubeOS NAT rules (Docker rules preserved)", len(removed))
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"removed": removed,
+		"message": "CubeOS NAT rules removed (Docker rules preserved)",
+	})
 }
 
 // EnableIPForward enables IP forwarding
