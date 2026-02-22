@@ -1469,7 +1469,7 @@ func (h *HALHandler) SetStaticIP(w http.ResponseWriter, r *http.Request) {
 // Uses nsenter to access the host's /etc/netplan/ directory.
 // Optionally reconfigures a specific interface after writing.
 // @Summary Write netplan configuration
-// @Description Writes netplan YAML to host and applies via networkctl reload
+// @Description Writes netplan YAML to host and applies via netplan apply
 // @Tags network
 // @Accept json
 // @Produce json
@@ -1522,33 +1522,28 @@ func (h *HALHandler) WriteNetplan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// B112: Generate networkd .network files from netplan YAML.
-	// Without this, networkctl reload reads stale /run/systemd/network/*.network files
-	// that don't reflect the new netplan YAML (e.g., DHCP config missing after mode switch).
-	_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "--",
-		"netplan", "generate")
-	if err != nil {
-		log.Printf("WriteNetplan: netplan generate failed: %v", err)
-		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("netplan generate", err))
-		return
-	}
-
-	// Reload networkd to pick up the freshly generated .network files
+	// Apply netplan: generates networkd configs, reloads networkd, AND manages
+	// wpa_supplicant lifecycle for wifis: sections. Previously this used a 3-step
+	// process (netplan generate → networkctl reload → networkctl reconfigure) which
+	// updated networkd but never started wpa_supplicant, causing WiFi connections
+	// to fail with NO-CARRIER on wlan1. netplan apply handles everything including
+	// starting wpa_supplicant for WiFi interfaces. (B126)
 	_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
-		"networkctl", "reload")
+		"netplan", "apply")
 	if err != nil {
-		log.Printf("WriteNetplan: networkctl reload failed: %v", err)
-		// Non-fatal — netplan is written + generated, will take effect on reboot
+		log.Printf("WriteNetplan: netplan apply failed: %v", err)
+		// Non-fatal — netplan is written, will take effect on reboot
 	}
 
-	// Optionally reconfigure a specific interface (e.g., eth0 for ONLINE_ETH, wlan1 for ONLINE_WIFI)
+	// Optionally reconfigure a specific interface (e.g., after netplan apply,
+	// give networkd an extra nudge for the target interface)
 	if req.ReconfigureIface != "" {
-		time.Sleep(time.Second) // Let networkd process the reload
+		time.Sleep(time.Second) // Let netplan apply settle
 		_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
 			"networkctl", "reconfigure", req.ReconfigureIface)
 		if err != nil {
 			log.Printf("WriteNetplan: reconfigure %s failed: %v", req.ReconfigureIface, err)
-			// Non-fatal — netplan is written + generated
+			// Non-fatal — netplan is applied
 		}
 	}
 
