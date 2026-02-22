@@ -597,6 +597,66 @@ func freqToChannel(freq int) int {
 	}
 }
 
+// ensureWpaSupplicant starts wpa_supplicant on the given interface if it's not
+// already running. Required before any wpa_cli commands can succeed.
+// On Ubuntu 24.04 with networkd, wpa_supplicant is disabled at boot to avoid
+// conflicting with hostapd on wlan0. It only starts automatically when networkd
+// processes a netplan wifis: section. If ConnectWiFi is called before netplan is
+// configured (e.g., from the simple /network/wifi/connect endpoint), wpa_cli would
+// fail with "add_network" error. This function ensures wpa_supplicant is running
+// on the specified interface before proceeding.
+// Uses nsenter to run in the host's mount+network namespace.
+func ensureWpaSupplicant(ctx context.Context, iface string) error {
+	// Quick check: try wpa_cli status — if it works, wpa_supplicant is already running
+	_, err := execWpaCli(ctx, "-i", iface, "status")
+	if err == nil {
+		return nil // Already running
+	}
+
+	log.Printf("ensureWpaSupplicant(%s): wpa_supplicant not running, starting it", iface)
+
+	// Ensure a minimal wpa_supplicant config exists for this interface.
+	// The config needs ctrl_interface for wpa_cli to connect, and update_config=1
+	// so wpa_cli save_config can persist networks.
+	confPath := fmt.Sprintf("/etc/wpa_supplicant/wpa_supplicant-%s.conf", iface)
+	checkCmd := fmt.Sprintf(`test -f %s || cat > %s << 'EOF'
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+EOF`, confPath, confPath)
+
+	_, err = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "--", "bash", "-c", checkCmd)
+	if err != nil {
+		log.Printf("ensureWpaSupplicant(%s): failed to create per-interface config: %v, trying generic", iface, err)
+		// Fall back to generic config
+		genericConf := "/etc/wpa_supplicant/wpa_supplicant.conf"
+		checkGeneric := fmt.Sprintf(`test -f %s || cat > %s << 'EOF'
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+EOF`, genericConf, genericConf)
+		_, _ = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "--", "bash", "-c", checkGeneric)
+		confPath = genericConf
+	}
+
+	// Start wpa_supplicant in daemon mode on the host
+	_, err = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"wpa_supplicant", "-B", "-D", "nl80211", "-i", iface, "-c", confPath)
+	if err != nil {
+		return fmt.Errorf("failed to start wpa_supplicant on %s: %w", iface, err)
+	}
+
+	// Give it a moment to create the control socket
+	time.Sleep(500 * time.Millisecond)
+
+	// Verify it's running
+	_, err = execWpaCli(ctx, "-i", iface, "status")
+	if err != nil {
+		return fmt.Errorf("wpa_supplicant started but control socket not ready on %s", iface)
+	}
+
+	log.Printf("ensureWpaSupplicant(%s): started successfully", iface)
+	return nil
+}
+
 // ConnectWiFi connects to a WiFi network
 // @Summary Connect to WiFi
 // @Description Connects to a WiFi network using wpa_supplicant
@@ -644,6 +704,17 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// B126: Ensure wpa_supplicant is running on this interface before any wpa_cli
+	// commands. On Ubuntu 24.04, wpa_supplicant is disabled at boot to avoid
+	// conflicting with hostapd on wlan0. For USB dongle interfaces (wlan1), it
+	// must be started explicitly if netplan hasn't already triggered it.
+	if err := ensureWpaSupplicant(r.Context(), req.Interface); err != nil {
+		log.Printf("ConnectWiFi: %v", err)
+		errorResponse(w, http.StatusInternalServerError,
+			fmt.Sprintf("wpa_supplicant not available on %s — is the WiFi adapter ready?", req.Interface))
+		return
+	}
+
 	// Check if this SSID already exists as a saved network
 	existingID := ""
 	listOutput, listErr := execWpaCli(r.Context(), "-i", req.Interface, "list_networks")
@@ -674,8 +745,9 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 
 		output, err := execWpaCli(r.Context(), "-i", req.Interface, "add_network")
 		if err != nil {
-			log.Printf("ConnectWiFi: add_network: %v", err)
-			errorResponse(w, http.StatusInternalServerError, "failed to add network")
+			log.Printf("ConnectWiFi: add_network on %s failed: %v (output: %s)", req.Interface, err, output)
+			errorResponse(w, http.StatusInternalServerError,
+				fmt.Sprintf("failed to add network on %s — wpa_supplicant may not be running", req.Interface))
 			return
 		}
 		networkID = strings.TrimSpace(output)
