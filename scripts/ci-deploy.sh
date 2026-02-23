@@ -22,15 +22,28 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 # --- Deploy ---
 cd /cubeos/coreapps/cubeos-hal/appconfig
 
-echo "Pulling latest HAL image..."
-timeout 120 docker compose pull 2>&1 || echo "Pull failed, using cached..."
+# --- Pull from GHCR ---
+echo "Pulling latest HAL image from GHCR..."
+GHCR_IMAGE="ghcr.io/cubeos-app/hal"
+timeout 120 docker pull "${GHCR_IMAGE}:latest" 2>&1 || {
+  echo "Pull failed, using cached..."
+}
+
+# --- Retag for local registry ---
+LOCAL_REG_IMAGE="localhost:5000/cubeos-app/hal:latest"
+docker tag "${GHCR_IMAGE}:latest" "${LOCAL_REG_IMAGE}" 2>/dev/null || true
+
+# --- Push to local registry (keeps registry in sync) ---
+docker push "${LOCAL_REG_IMAGE}" 2>/dev/null && \
+  echo "  Pushed to local registry: ${LOCAL_REG_IMAGE}" || \
+  echo "  WARN: Local registry push failed (non-fatal)"
 
 echo "Stopping existing HAL..."
 docker rm -f cubeos-hal 2>/dev/null || true
 docker compose down 2>/dev/null || true
 
 echo "Starting HAL..."
-docker compose up -d --pull always
+DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up -d --pull never
 
 # --- Health check ---
 sleep 5
