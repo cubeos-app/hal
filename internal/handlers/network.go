@@ -406,7 +406,7 @@ func (h *HALHandler) GetNetworkStatus(w http.ResponseWriter, r *http.Request) {
 // NetworkModeResponse represents the current CubeOS network mode.
 // @Description Current network operating mode
 type NetworkModeResponse struct {
-	Mode        string `json:"mode" example:"ONLINE_ETH"`
+	Mode        string `json:"mode" example:"wifi_router"`
 	Description string `json:"description" example:"Access point with internet via Ethernet"`
 	APActive    bool   `json:"ap_active" example:"true"`
 	EthUp       bool   `json:"eth_up" example:"true"`
@@ -416,14 +416,14 @@ type NetworkModeResponse struct {
 
 // GetNetworkMode returns the current CubeOS network operating mode.
 // @Summary Get network mode
-// @Description Returns current mode: OFFLINE (AP only), ONLINE_ETH (AP+NAT via Ethernet), or ONLINE_WIFI (AP+NAT via USB WiFi)
+// @Description Returns current mode: offline_hotspot, wifi_router, or wifi_bridge
 // @Tags Network
 // @Produce json
 // @Success 200 {object} NetworkModeResponse
 // @Router /network/mode [get]
 func (h *HALHandler) GetNetworkMode(w http.ResponseWriter, r *http.Request) {
 	resp := NetworkModeResponse{
-		Mode:        "OFFLINE",
+		Mode:        "offline_hotspot",
 		Description: "Access point only, air-gapped",
 	}
 
@@ -470,13 +470,13 @@ func (h *HALHandler) GetNetworkMode(w http.ResponseWriter, r *http.Request) {
 
 	// Determine mode
 	if resp.EthUp && resp.Internet {
-		resp.Mode = "ONLINE_ETH"
+		resp.Mode = "wifi_router"
 		resp.Description = "Access point with internet via Ethernet"
 	} else if resp.WifiClient && resp.Internet {
-		resp.Mode = "ONLINE_WIFI"
+		resp.Mode = "wifi_bridge"
 		resp.Description = "Access point with internet via USB WiFi dongle"
 	} else {
-		resp.Mode = "OFFLINE"
+		resp.Mode = "offline_hotspot"
 		resp.Description = "Access point only, air-gapped"
 	}
 
