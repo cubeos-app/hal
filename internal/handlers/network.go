@@ -1554,3 +1554,417 @@ func (h *HALHandler) WriteNetplan(w http.ResponseWriter, r *http.Request) {
 		"reconfigured": req.ReconfigureIface,
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Station mode endpoints (wifi_client) — Phase 6b
+// ---------------------------------------------------------------------------
+
+// StopHostapd stops the WiFi access point and releases wlan0 for client use.
+// @Summary Stop WiFi access point
+// @Description Stops hostapd, flushes wlan0 IP, and verifies the interface is released for station use
+// @Tags Network
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Failure 500 {object} ErrorResponse
+// @Router /network/hostapd/stop [post]
+func (h *HALHandler) StopHostapd(w http.ResponseWriter, r *http.Request) {
+	iface := getDefaultWiFiInterface()
+
+	// 1. Stop hostapd via systemctl
+	_, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+		"systemctl", "stop", "hostapd")
+	if err != nil {
+		log.Printf("StopHostapd: systemctl stop failed: %v", err)
+		// Non-fatal — hostapd may already be stopped
+	}
+
+	// 2. Wait for clean shutdown
+	time.Sleep(time.Second)
+
+	// 3. Flush IP from wlan0
+	_, _ = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+		"ip", "addr", "flush", "dev", iface)
+
+	// 4. Verify hostapd is not running
+	output, _ := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+		"systemctl", "is-active", "hostapd")
+	active := strings.TrimSpace(output) == "active"
+	if active {
+		log.Printf("StopHostapd: hostapd still active after stop")
+		errorResponse(w, http.StatusInternalServerError, "hostapd still running after stop attempt")
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"stopped":   true,
+		"interface": iface,
+	})
+}
+
+// StationConnectRequest is the request body for ConnectStation.
+type StationConnectRequest struct {
+	SSID           string `json:"ssid"`
+	Password       string `json:"password"`
+	Interface      string `json:"interface"`
+	TimeoutSeconds int    `json:"timeout_seconds"`
+}
+
+// StationConnectResponse is the response from ConnectStation.
+type StationConnectResponse struct {
+	Connected bool   `json:"connected"`
+	IP        string `json:"ip,omitempty"`
+	Gateway   string `json:"gateway,omitempty"`
+	Interface string `json:"interface"`
+}
+
+// ConnectStation connects wlan0 as a WiFi client with timeout.
+// @Summary Connect wlan0 as WiFi station
+// @Description Ensures wpa_supplicant is running, connects to SSID, writes netplan, waits for IP within timeout
+// @Tags Network
+// @Accept json
+// @Produce json
+// @Param request body StationConnectRequest true "Station connection parameters"
+// @Success 200 {object} StationConnectResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 408 {object} ErrorResponse "Connection timeout"
+// @Failure 500 {object} ErrorResponse
+// @Router /network/station/connect [post]
+func (h *HALHandler) ConnectStation(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<20)
+
+	var req StationConnectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Validate SSID
+	if err := validateSSID(req.SSID); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Validate password if provided
+	if req.Password != "" {
+		if err := validateWiFiPassword(req.Password); err != nil {
+			errorResponse(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	// Default interface
+	if req.Interface == "" {
+		req.Interface = getDefaultWiFiInterface()
+	}
+	if err := validateInterfaceName(req.Interface); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Default and max timeout
+	if req.TimeoutSeconds <= 0 {
+		req.TimeoutSeconds = 30
+	}
+	if req.TimeoutSeconds > 120 {
+		req.TimeoutSeconds = 120
+	}
+
+	ctx := r.Context()
+
+	// 1. Ensure wpa_supplicant is running
+	if err := ensureWpaSupplicant(ctx, req.Interface); err != nil {
+		log.Printf("ConnectStation: wpa_supplicant setup failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError,
+			fmt.Sprintf("wpa_supplicant not available on %s", req.Interface))
+		return
+	}
+
+	// 2. Connect via wpa_cli — check if SSID already exists
+	existingID := ""
+	listOutput, listErr := execWpaCli(ctx, "-i", req.Interface, "list_networks")
+	if listErr == nil {
+		for _, line := range strings.Split(listOutput, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[1] == req.SSID {
+				existingID = fields[0]
+				break
+			}
+		}
+	}
+
+	var networkID string
+	if existingID != "" && req.Password == "" {
+		networkID = existingID
+	} else {
+		if existingID != "" {
+			_, _ = execWpaCli(ctx, "-i", req.Interface, "remove_network", existingID)
+		}
+		output, err := execWpaCli(ctx, "-i", req.Interface, "add_network")
+		if err != nil {
+			log.Printf("ConnectStation: add_network failed: %v", err)
+			errorResponse(w, http.StatusInternalServerError, "failed to add network")
+			return
+		}
+		networkID = strings.TrimSpace(output)
+
+		// Set SSID
+		_, err = execWpaCli(ctx, "-i", req.Interface, "set_network",
+			networkID, "ssid", fmt.Sprintf("\"%s\"", req.SSID))
+		if err != nil {
+			log.Printf("ConnectStation: set ssid failed: %v", err)
+			errorResponse(w, http.StatusInternalServerError, "failed to configure SSID")
+			return
+		}
+
+		// Set password or open
+		if req.Password != "" {
+			_, err = execWpaCli(ctx, "-i", req.Interface, "set_network",
+				networkID, "psk", fmt.Sprintf("\"%s\"", req.Password))
+			if err != nil {
+				log.Printf("ConnectStation: set psk failed: %v", err)
+				errorResponse(w, http.StatusInternalServerError, "failed to configure password")
+				return
+			}
+		} else {
+			_, err = execWpaCli(ctx, "-i", req.Interface, "set_network",
+				networkID, "key_mgmt", "NONE")
+			if err != nil {
+				log.Printf("ConnectStation: set key_mgmt failed: %v", err)
+			}
+		}
+	}
+
+	// Select network (forces connection)
+	_, err := execWpaCli(ctx, "-i", req.Interface, "select_network", networkID)
+	if err != nil {
+		log.Printf("ConnectStation: select_network failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, "failed to select network")
+		return
+	}
+
+	// Save config (best effort)
+	_, _ = execWpaCli(ctx, "-i", req.Interface, "save_config")
+
+	// 3. Write netplan with wifis: section so networkd handles DHCP
+	netplanYAML := fmt.Sprintf("network:\n  version: 2\n  renderer: networkd\n  wifis:\n    %s:\n      dhcp4: true\n      optional: true\n      access-points:\n        \"%s\":\n          password: \"%s\"\n",
+		req.Interface, req.SSID, req.Password)
+
+	writeCmd := fmt.Sprintf("cat > /etc/netplan/01-cubeos.yaml << 'CUBEOS_NETPLAN_EOF'\n%sCUBEOS_NETPLAN_EOF", netplanYAML)
+	_, writeErr := execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "--",
+		"bash", "-c", writeCmd)
+	if writeErr != nil {
+		log.Printf("ConnectStation: netplan write failed: %v", writeErr)
+	}
+
+	// Apply netplan
+	_, _ = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"netplan", "apply")
+
+	// 4. Poll for IP on interface every 2s until timeout
+	deadline := time.Now().Add(time.Duration(req.TimeoutSeconds) * time.Second)
+	var ip, gateway string
+	for time.Now().Before(deadline) {
+		ip, gateway = getInterfaceIPAndGateway(ctx, req.Interface)
+		if ip != "" {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	if ip == "" {
+		log.Printf("ConnectStation: timeout waiting for IP on %s", req.Interface)
+		errorResponse(w, http.StatusRequestTimeout,
+			fmt.Sprintf("timeout waiting for IP on %s after %ds", req.Interface, req.TimeoutSeconds))
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, StationConnectResponse{
+		Connected: true,
+		IP:        ip,
+		Gateway:   gateway,
+		Interface: req.Interface,
+	})
+}
+
+// getInterfaceIPAndGateway extracts IPv4 address and default gateway for an interface.
+func getInterfaceIPAndGateway(ctx context.Context, iface string) (string, string) {
+	// Get IP
+	ipOutput, err := execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"ip", "-4", "-o", "addr", "show", iface)
+	if err != nil {
+		return "", ""
+	}
+	var ip string
+	for _, line := range strings.Split(ipOutput, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.Fields(line)
+		for i, p := range parts {
+			if p == "inet" && i+1 < len(parts) {
+				addr := parts[i+1]
+				if idx := strings.Index(addr, "/"); idx >= 0 {
+					addr = addr[:idx]
+				}
+				ip = addr
+				break
+			}
+		}
+		if ip != "" {
+			break
+		}
+	}
+
+	// Get gateway
+	var gateway string
+	gwOutput, gwErr := execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"ip", "-4", "route", "show", "default")
+	if gwErr == nil {
+		for _, line := range strings.Split(gwOutput, "\n") {
+			fields := strings.Fields(line)
+			for i, f := range fields {
+				if f == "via" && i+1 < len(fields) {
+					gateway = fields[i+1]
+					break
+				}
+			}
+			if gateway != "" {
+				break
+			}
+		}
+	}
+
+	return ip, gateway
+}
+
+// StationVerifyResponse is the response from VerifyStation.
+type StationVerifyResponse struct {
+	Connected bool   `json:"connected"`
+	IP        string `json:"ip,omitempty"`
+	Gateway   string `json:"gateway,omitempty"`
+	Internet  bool   `json:"internet"`
+	Interface string `json:"interface"`
+}
+
+// VerifyStation checks if wlan0 station mode is working.
+// @Summary Verify WiFi station connectivity
+// @Description Checks if wlan0 has an IP address and can reach the gateway
+// @Tags Network
+// @Produce json
+// @Param interface query string false "Interface name" default(wlan0)
+// @Success 200 {object} StationVerifyResponse
+// @Router /network/station/verify [get]
+func (h *HALHandler) VerifyStation(w http.ResponseWriter, r *http.Request) {
+	iface := r.URL.Query().Get("interface")
+	if iface == "" {
+		iface = getDefaultWiFiInterface()
+	}
+	if err := validateInterfaceName(iface); err != nil {
+		errorResponse(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx := r.Context()
+
+	// 1. Check if interface has an IPv4 address
+	ip, gateway := getInterfaceIPAndGateway(ctx, iface)
+	if ip == "" {
+		jsonResponse(w, http.StatusOK, StationVerifyResponse{
+			Connected: false,
+			Internet:  false,
+			Interface: iface,
+		})
+		return
+	}
+
+	// 2. Ping gateway (1 packet, 2s timeout)
+	gatewayReachable := false
+	if gateway != "" {
+		_, err := execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+			"ping", "-c", "1", "-W", "2", gateway)
+		gatewayReachable = err == nil
+	}
+
+	// 3. Ping internet check IP
+	internetReachable := false
+	checkIP := getDefaultInternetCheckIP()
+	_, err := execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"ping", "-c", "1", "-W", "3", checkIP)
+	internetReachable = err == nil
+
+	jsonResponse(w, http.StatusOK, StationVerifyResponse{
+		Connected: gatewayReachable || ip != "",
+		IP:        ip,
+		Gateway:   gateway,
+		Internet:  internetReachable,
+		Interface: iface,
+	})
+}
+
+// RevertToAP reverts from station mode to access point mode.
+// @Summary Revert to Access Point mode
+// @Description Stops wpa_supplicant on wlan0, restores AP netplan, starts hostapd
+// @Tags Network
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Failure 500 {object} ErrorResponse
+// @Router /network/ap/revert [post]
+func (h *HALHandler) RevertToAP(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	iface := getDefaultWiFiInterface()
+	gatewayIP := os.Getenv("CUBEOS_GATEWAY_IP")
+	if gatewayIP == "" {
+		gatewayIP = "10.42.24.1"
+	}
+
+	// 1. Disconnect wpa_supplicant on wlan0
+	_, _ = execWpaCli(ctx, "-i", iface, "disconnect")
+	// Stop wpa_supplicant service
+	_, _ = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"systemctl", "stop", "wpa_supplicant")
+
+	// 2. Flush wlan0 IP
+	_, _ = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"ip", "addr", "flush", "dev", iface)
+
+	// 3. Restore AP netplan (offline_hotspot: wlan0 under ethernets with static IP)
+	apNetplan := fmt.Sprintf("network:\n  version: 2\n  renderer: networkd\n  ethernets:\n    eth0:\n      dhcp4: true\n      optional: true\n    %s:\n      addresses:\n        - %s/24\n      optional: true\n",
+		iface, gatewayIP)
+
+	writeCmd := fmt.Sprintf("cat > /etc/netplan/01-cubeos.yaml << 'CUBEOS_NETPLAN_EOF'\n%sCUBEOS_NETPLAN_EOF", apNetplan)
+	_, err := execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "--",
+		"bash", "-c", writeCmd)
+	if err != nil {
+		log.Printf("RevertToAP: netplan write failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("write AP netplan", err))
+		return
+	}
+
+	// 4. Apply netplan
+	_, err = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"netplan", "apply")
+	if err != nil {
+		log.Printf("RevertToAP: netplan apply failed: %v", err)
+		// Non-fatal — continue to start hostapd
+	}
+
+	// 5. Start hostapd
+	_, err = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"systemctl", "start", "hostapd")
+	if err != nil {
+		log.Printf("RevertToAP: hostapd start failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("start hostapd", err))
+		return
+	}
+
+	// 6. Wait and verify hostapd is active
+	time.Sleep(2 * time.Second)
+	output, _ := execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"systemctl", "is-active", "hostapd")
+	apActive := strings.TrimSpace(output) == "active"
+
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"reverted":  true,
+		"mode":      "offline_hotspot",
+		"ap_active": apActive,
+		"interface": iface,
+	})
+}

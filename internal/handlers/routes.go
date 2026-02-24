@@ -106,6 +106,12 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/ap/block", h.BlockAPClient)
 		r.Post("/ap/unblock/{mac}", h.UnblockAPClient)
 
+		// Station mode (wifi_client)
+		r.Post("/hostapd/stop", h.StopHostapd)
+		r.Post("/station/connect", h.ConnectStation)
+		r.Get("/station/verify", h.VerifyStation)
+		r.Post("/ap/revert", h.RevertToAP)
+
 		// DHCP & Static IP
 		r.Post("/dhcp/request", h.RequestDHCP)
 		r.Post("/ip/static", h.SetStaticIP)
