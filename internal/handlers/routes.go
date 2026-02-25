@@ -98,26 +98,26 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/wifi/saved", h.GetSavedWiFiNetworks)
 		r.Delete("/wifi/saved/{ssid}", h.ForgetWiFiNetwork)
 
-		// Access Point
+		// Access Point (requires full tier for mutations)
 		r.Get("/ap/status", h.GetAPStatus)
 		r.Get("/ap/clients", h.GetAPClients)
 		r.Get("/ap/blocklist", h.GetAPBlocklist)
-		r.Post("/ap/disconnect", h.DisconnectAPClient)
-		r.Post("/ap/block", h.BlockAPClient)
-		r.Post("/ap/unblock/{mac}", h.UnblockAPClient)
+		r.Post("/ap/disconnect", h.requireFullTier(h.DisconnectAPClient))
+		r.Post("/ap/block", h.requireFullTier(h.BlockAPClient))
+		r.Post("/ap/unblock/{mac}", h.requireFullTier(h.UnblockAPClient))
 
-		// Station mode (wifi_client)
-		r.Post("/hostapd/stop", h.StopHostapd)
-		r.Post("/station/connect", h.ConnectStation)
+		// Station mode (wifi_client) — requires full tier
+		r.Post("/hostapd/stop", h.requireFullTier(h.StopHostapd))
+		r.Post("/station/connect", h.requireFullTier(h.ConnectStation))
 		r.Get("/station/verify", h.VerifyStation)
-		r.Post("/ap/revert", h.RevertToAP)
+		r.Post("/ap/revert", h.requireFullTier(h.RevertToAP))
 
 		// DHCP & Static IP
 		r.Post("/dhcp/request", h.RequestDHCP)
 		r.Post("/ip/static", h.SetStaticIP)
 
-		// Netplan management (T10)
-		r.Post("/netplan", h.WriteNetplan)
+		// Netplan management (T10) — requires full tier
+		r.Post("/netplan", h.requireFullTier(h.WriteNetplan))
 
 		// Port scanning (host-level listening ports)
 		r.Get("/ports/listening", h.ListeningPortsHandler)
@@ -129,8 +129,8 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/rule", h.AddFirewallRule)
 		r.Delete("/rule", h.DeleteFirewallRule)
 		r.Get("/nat/status", h.GetNATStatus)
-		r.Post("/nat/enable", h.EnableNAT)
-		r.Post("/nat/disable", h.DisableNAT)
+		r.Post("/nat/enable", h.requireFullTier(h.EnableNAT))
+		r.Post("/nat/disable", h.requireFullTier(h.DisableNAT))
 		r.Get("/forwarding", h.GetForwardingStatus)
 		r.Post("/forward/enable", h.EnableIPForward)
 		r.Post("/forward/disable", h.DisableIPForward)
@@ -182,6 +182,9 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/journal", h.GetJournalLogs)
 		r.Get("/hardware", h.GetHardwareLogs)
 	})
+
+	// Hardware Detection
+	r.Get("/hardware/interfaces", h.DetectInterfaces)
 
 	// Support bundle
 	r.Get("/support/bundle.zip", h.GetSupportBundle)

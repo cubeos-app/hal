@@ -17,6 +17,7 @@ type HALHandler struct {
 	powerMonitor *PowerMonitor
 	iridium      *IridiumDriver
 	meshtastic   *MeshtasticDriver
+	tier         string // "full" (default) or "container"
 
 	// Stream process tracking (camera)
 	streamMu     sync.Mutex
@@ -26,10 +27,31 @@ type HALHandler struct {
 
 // NewHALHandler creates a new HAL handler instance.
 func NewHALHandler() *HALHandler {
+	tier := os.Getenv("CUBEOS_TIER")
+	if tier == "" {
+		tier = "full"
+	}
 	return &HALHandler{
 		powerMonitor: NewPowerMonitor(),
 		iridium:      NewIridiumDriver(),
 		meshtastic:   NewMeshtasticDriver(),
+		tier:         tier,
+	}
+}
+
+// IsContainerTier returns true when HAL is running without host access (container-only mode).
+func (h *HALHandler) IsContainerTier() bool {
+	return h.tier == "container"
+}
+
+// requireFullTier returns 501 Not Implemented for container-tier installations.
+func (h *HALHandler) requireFullTier(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if h.IsContainerTier() {
+			errorResponse(w, http.StatusNotImplemented, "This endpoint requires CUBEOS_TIER=full (bare-metal installation)")
+			return
+		}
+		next(w, r)
 	}
 }
 
