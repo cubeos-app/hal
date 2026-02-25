@@ -21,7 +21,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"cubeos-hal/internal/config"
 	"cubeos-hal/internal/handlers"
+	"cubeos-hal/internal/middleware"
 )
 
 func main() {
@@ -35,8 +37,14 @@ func main() {
 		port = "6005"
 	}
 
+	// Load ACL configuration
+	acl := config.LoadACLConfig()
+
 	// Create router
 	r := chi.NewRouter()
+
+	// Apply ACL authentication middleware to all routes
+	r.Use(middleware.ACLAuth(acl))
 
 	// Create handler
 	h := handlers.NewHALHandler()
