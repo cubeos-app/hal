@@ -77,6 +77,9 @@ func (h *HALHandler) DetectInterfaces(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if hasDeviceDir(name) {
 			iface.Type = "ethernet"
+		} else if looksLikeEthernet(name) {
+			// LXC/container veth pairs appear as eth0 without /sys/class/net/eth0/device
+			iface.Type = "ethernet"
 		} else {
 			iface.Type = "other"
 		}
@@ -153,6 +156,12 @@ func isWiFiInterface(name string) bool {
 func hasDeviceDir(name string) bool {
 	info, err := os.Stat(filepath.Join("/sys/class/net", name, "device"))
 	return err == nil && info.IsDir()
+}
+
+// looksLikeEthernet returns true if the interface name follows common ethernet naming.
+// In LXC/containers, veth pairs appear as eth0 without a /sys/class/net/eth0/device dir.
+func looksLikeEthernet(name string) bool {
+	return strings.HasPrefix(name, "eth") || strings.HasPrefix(name, "en")
 }
 
 // detectBusType reads /sys/class/net/{name}/device/subsystem symlink to determine bus.

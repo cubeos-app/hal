@@ -843,9 +843,24 @@ func (h *HALHandler) GetSystemInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 // detectDeviceModel returns a human-readable device name for non-Pi systems.
-// Uses systemd-detect-virt for containers/VMs, DMI for physical x86 hardware.
+// Detection order:
+//  1. CUBEOS_TIER env var (set by installer, always available in container)
+//  2. Host PID 1 environment (HAL has pid:host, so /proc/1/environ is the host's init)
+//  3. systemd-detect-virt (works on bare-metal hosts, not inside Docker)
+//  4. DMI product name (physical x86 hardware)
+//  5. CPU model name as last resort
 func detectDeviceModel(ctx context.Context) string {
-	// Check virtualization environment
+	// 1. Check CUBEOS_TIER env var — fastest, always set by installer
+	if tier := os.Getenv("CUBEOS_TIER"); tier == "container" {
+		return detectContainerHost()
+	}
+
+	// 2. Check host PID 1 environment (HAL runs with pid:host)
+	if virt := detectVirtFromProc(); virt != "" {
+		return virt
+	}
+
+	// 3. Try systemd-detect-virt (available on bare-metal hosts, not in Docker)
 	if output, err := exec.CommandContext(ctx, "systemd-detect-virt").Output(); err == nil {
 		virt := strings.TrimSpace(string(output))
 		switch virt {
@@ -870,7 +885,7 @@ func detectDeviceModel(ctx context.Context) string {
 		}
 	}
 
-	// Physical hardware: try DMI product name
+	// 4. Physical hardware: try DMI product name
 	if data, err := os.ReadFile("/sys/class/dmi/id/product_name"); err == nil {
 		name := strings.TrimSpace(string(data))
 		if name != "" && name != "System Product Name" && name != "To Be Filled By O.E.M." {
@@ -878,7 +893,7 @@ func detectDeviceModel(ctx context.Context) string {
 		}
 	}
 
-	// Fallback: CPU model name
+	// 5. Fallback: CPU model name
 	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
 			if strings.HasPrefix(line, "model name") {
@@ -891,6 +906,58 @@ func detectDeviceModel(ctx context.Context) string {
 	}
 
 	return "Unknown x86_64 System"
+}
+
+// detectContainerHost identifies the host virtualization type when CUBEOS_TIER=container.
+// HAL has pid:host, so /proc/1/environ contains the host init's environment.
+func detectContainerHost() string {
+	// Read host PID 1 environment for container= indicator
+	if data, err := os.ReadFile("/proc/1/environ"); err == nil {
+		// environ uses NUL bytes as separators
+		for _, entry := range strings.Split(string(data), "\x00") {
+			if strings.HasPrefix(entry, "container=") {
+				virt := strings.TrimPrefix(entry, "container=")
+				switch virt {
+				case "lxc":
+					return "LXC Container (x86_64)"
+				case "docker":
+					return "Docker Container (x86_64)"
+				case "podman":
+					return "Podman Container (x86_64)"
+				default:
+					if virt != "" {
+						return "Container (" + virt + ")"
+					}
+				}
+			}
+		}
+	}
+
+	return "x86_64 Container"
+}
+
+// detectVirtFromProc reads /proc/1/environ for container= on systems with pid:host.
+func detectVirtFromProc() string {
+	data, err := os.ReadFile("/proc/1/environ")
+	if err != nil {
+		return ""
+	}
+	for _, entry := range strings.Split(string(data), "\x00") {
+		if strings.HasPrefix(entry, "container=") {
+			virt := strings.TrimPrefix(entry, "container=")
+			switch virt {
+			case "lxc":
+				return "LXC Container (x86_64)"
+			case "docker":
+				return "Docker Container (x86_64)"
+			default:
+				if virt != "" {
+					return "Container (" + virt + ")"
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // CPUInfoResponse represents CPU information.
