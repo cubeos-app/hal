@@ -164,9 +164,15 @@ var knownGPSVIDPIDs = map[string]string{
 	"067b:2303": "Prolific PL2303 (GPS adapter)",
 	"067b:23a3": "Prolific PL2303 (GPS adapter)",
 	"10c4:ea60": "SiLabs CP210x (GPS adapter)", // Note: also used by some Meshtastic — isMeshtasticVIDPID() takes priority
-	"0403:6001": "FTDI FT232R (GPS adapter)",
 	"091e:0003": "Garmin GPS 18x",
 	"1199:68a2": "Sierra Wireless GPS",
+}
+
+// ambiguousGPSVIDPIDs contains generic USB-serial VID:PID pairs used by BOTH GPS
+// receivers and other serial devices (e.g., Iridium modems). Devices matching
+// these VID:PIDs require NMEA verification before claiming as GPS.
+var ambiguousGPSVIDPIDs = map[string]string{
+	"0403:6001": "FTDI FT232R", // Used by GPS adapters AND RockBLOCK 9603 Iridium modem
 }
 
 func (h *HALHandler) scanGPSDevices() []GPSDevice {
@@ -197,39 +203,75 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 				continue
 			}
 
+			// Skip ports actively used by Iridium driver to avoid disrupting
+			// an active modem connection (e.g., changing baud rate via stty)
+			if h.iridium.IsConnected() && h.iridium.Port() == port {
+				log.Printf("gps: %s in use by Iridium driver, skipping", port)
+				continue
+			}
+
 			// Check VID:PID against known GPS devices
 			vidpid := findUSBVIDPID(port)
 			gpsName, isKnownGPS := knownGPSVIDPIDs[vidpid]
 
-			if !isKnownGPS {
-				// Unknown USB device — don't claim it's a GPS receiver.
-				// Log for diagnostics but skip silently.
-				if vidpid != "" {
-					log.Printf("gps: %s has unknown VID:PID=%s, skipping", port, vidpid)
+			if isKnownGPS {
+				// Known GPS device — read USB product strings for display
+				device := GPSDevice{
+					Port:     port,
+					Name:     gpsName,
+					BaudRate: 9600,
+					Active:   true,
+				}
+
+				devName := strings.TrimPrefix(port, "/dev/")
+				sysPath := "/sys/class/tty/" + devName + "/device"
+				if vendorData, err := os.ReadFile(sysPath + "/../manufacturer"); err == nil {
+					device.Vendor = strings.TrimSpace(string(vendorData))
+				}
+				if productData, err := os.ReadFile(sysPath + "/../product"); err == nil {
+					device.Product = strings.TrimSpace(string(productData))
+					device.Name = device.Product // Prefer USB product string over table name
+				}
+
+				log.Printf("gps: %s identified as GPS device (VID:PID=%s, name=%s)", port, vidpid, device.Name)
+				devices = append(devices, device)
+				continue
+			}
+
+			// Check ambiguous VID:PIDs — these MIGHT be GPS but are also used by
+			// other serial devices (e.g., FTDI FT232R serves both GPS adapters and
+			// RockBLOCK 9603 Iridium modems). Verify via NMEA probe before claiming.
+			if ambiguousName, isAmbiguous := ambiguousGPSVIDPIDs[vidpid]; isAmbiguous {
+				if probeForNMEA(port) {
+					device := GPSDevice{
+						Port:     port,
+						Name:     ambiguousName,
+						BaudRate: 9600,
+						Active:   true,
+					}
+
+					devName := strings.TrimPrefix(port, "/dev/")
+					sysPath := "/sys/class/tty/" + devName + "/device"
+					if vendorData, err := os.ReadFile(sysPath + "/../manufacturer"); err == nil {
+						device.Vendor = strings.TrimSpace(string(vendorData))
+					}
+					if productData, err := os.ReadFile(sysPath + "/../product"); err == nil {
+						device.Product = strings.TrimSpace(string(productData))
+						device.Name = device.Product
+					}
+
+					log.Printf("gps: %s verified as GPS via NMEA probe (VID:PID=%s)", port, vidpid)
+					devices = append(devices, device)
+				} else {
+					log.Printf("gps: %s has ambiguous VID:PID=%s (%s), no NMEA detected, skipping", port, vidpid, ambiguousName)
 				}
 				continue
 			}
 
-			// Known GPS device — read USB product strings for display
-			device := GPSDevice{
-				Port:     port,
-				Name:     gpsName,
-				BaudRate: 9600,
-				Active:   true,
+			// Unknown USB device — don't claim it's a GPS receiver.
+			if vidpid != "" {
+				log.Printf("gps: %s has unknown VID:PID=%s, skipping", port, vidpid)
 			}
-
-			devName := strings.TrimPrefix(port, "/dev/")
-			sysPath := "/sys/class/tty/" + devName + "/device"
-			if vendorData, err := os.ReadFile(sysPath + "/../manufacturer"); err == nil {
-				device.Vendor = strings.TrimSpace(string(vendorData))
-			}
-			if productData, err := os.ReadFile(sysPath + "/../product"); err == nil {
-				device.Product = strings.TrimSpace(string(productData))
-				device.Name = device.Product // Prefer USB product string over table name
-			}
-
-			log.Printf("gps: %s identified as GPS device (VID:PID=%s, name=%s)", port, vidpid, device.Name)
-			devices = append(devices, device)
 			continue
 		}
 
@@ -244,6 +286,60 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 	}
 
 	return devices
+}
+
+// probeForNMEA opens a serial port and checks if it outputs NMEA sentences.
+// Used for ambiguous USB VID:PIDs (e.g., FTDI 0403:6001) that could be GPS
+// receivers or AT modems (Iridium, etc.). Returns true only if valid NMEA
+// data (e.g., $GPGGA, $GNRMC) is received within 2 seconds.
+func probeForNMEA(port string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Configure serial port at standard GPS baud rate
+	if _, err := execWithTimeout(ctx, "stty", "-F", port, "9600", "raw", "-echo"); err != nil {
+		return false
+	}
+
+	f, err := os.Open(port)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	// Read with 2-second timeout
+	readCtx, readCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer readCancel()
+
+	// Close file on context expiry to unblock scanner.Scan()
+	closeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-readCtx.Done():
+			f.Close()
+		case <-closeDone:
+		}
+	}()
+	defer close(closeDone)
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if readCtx.Err() != nil {
+			break
+		}
+		line := scanner.Text()
+		// NMEA sentences from GPS/GNSS receivers
+		if strings.HasPrefix(line, "$GPGGA") || strings.HasPrefix(line, "$GNGGA") ||
+			strings.HasPrefix(line, "$GPRMC") || strings.HasPrefix(line, "$GNRMC") ||
+			strings.HasPrefix(line, "$GPGSV") || strings.HasPrefix(line, "$GNGSV") ||
+			strings.HasPrefix(line, "$GPGLL") || strings.HasPrefix(line, "$GNGLL") {
+			log.Printf("gps: NMEA probe on %s: detected GPS data", port)
+			return true
+		}
+	}
+
+	log.Printf("gps: NMEA probe on %s: no GPS data within timeout", port)
+	return false
 }
 
 func (h *HALHandler) readGPSStatus(ctx context.Context, port string) GPSStatus {
