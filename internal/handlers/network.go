@@ -468,16 +468,25 @@ func (h *HALHandler) GetNetworkMode(w http.ResponseWriter, r *http.Request) {
 	_, err := execWithTimeout(r.Context(), "ping", "-c", "1", "-W", "2", checkIP)
 	resp.Internet = err == nil
 
-	// Determine mode
-	if resp.EthUp && resp.Internet {
+	// Determine mode — AP state matters for distinguishing router vs client modes
+	if resp.APActive && resp.EthUp && resp.Internet {
 		resp.Mode = "wifi_router"
 		resp.Description = "Access point with internet via Ethernet"
-	} else if resp.WifiClient && resp.Internet {
+	} else if resp.APActive && resp.WifiClient && resp.Internet {
 		resp.Mode = "wifi_bridge"
-		resp.Description = "Access point with internet via USB WiFi dongle"
-	} else {
+		resp.Description = "Access point with internet via WiFi station"
+	} else if !resp.APActive && resp.EthUp && resp.Internet {
+		resp.Mode = "eth_client"
+		resp.Description = "Ethernet client, no access point"
+	} else if !resp.APActive && resp.WifiClient && resp.Internet {
+		resp.Mode = "wifi_client"
+		resp.Description = "WiFi client, no access point"
+	} else if resp.APActive {
 		resp.Mode = "offline_hotspot"
 		resp.Description = "Access point only, air-gapped"
+	} else {
+		resp.Mode = "offline_hotspot"
+		resp.Description = "No network connectivity"
 	}
 
 	jsonResponse(w, http.StatusOK, resp)

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -782,9 +783,14 @@ func (h *HALHandler) GetSystemInfo(w http.ResponseWriter, r *http.Request) {
 		PiVersion: detectPiVersion(),
 	}
 
-	// Model from device tree
+	// Model from device tree (Raspberry Pi, ARM SBCs)
 	if data, err := os.ReadFile("/sys/firmware/devicetree/base/model"); err == nil {
 		info.Model = strings.TrimRight(string(data), "\x00\n")
+	}
+
+	// Fallback: detect virtualization or physical x86 when device tree is absent
+	if info.Model == "" {
+		info.Model = detectDeviceModel(r.Context())
 	}
 
 	// Serial from device tree
@@ -834,6 +840,57 @@ func (h *HALHandler) GetSystemInfo(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jsonResponse(w, http.StatusOK, info)
+}
+
+// detectDeviceModel returns a human-readable device name for non-Pi systems.
+// Uses systemd-detect-virt for containers/VMs, DMI for physical x86 hardware.
+func detectDeviceModel(ctx context.Context) string {
+	// Check virtualization environment
+	if output, err := exec.CommandContext(ctx, "systemd-detect-virt").Output(); err == nil {
+		virt := strings.TrimSpace(string(output))
+		switch virt {
+		case "lxc":
+			return "LXC Container (x86_64)"
+		case "kvm":
+			return "KVM Virtual Machine"
+		case "qemu":
+			return "QEMU Virtual Machine"
+		case "vmware":
+			return "VMware Virtual Machine"
+		case "oracle":
+			return "VirtualBox Virtual Machine"
+		case "microsoft":
+			return "Hyper-V Virtual Machine"
+		case "none":
+			// Physical hardware — try DMI
+		default:
+			if virt != "" {
+				return "Virtual Machine (" + virt + ")"
+			}
+		}
+	}
+
+	// Physical hardware: try DMI product name
+	if data, err := os.ReadFile("/sys/class/dmi/id/product_name"); err == nil {
+		name := strings.TrimSpace(string(data))
+		if name != "" && name != "System Product Name" && name != "To Be Filled By O.E.M." {
+			return name
+		}
+	}
+
+	// Fallback: CPU model name
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "model name") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					return strings.TrimSpace(parts[1])
+				}
+			}
+		}
+	}
+
+	return "Unknown x86_64 System"
 }
 
 // CPUInfoResponse represents CPU information.
