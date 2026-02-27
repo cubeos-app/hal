@@ -121,6 +121,10 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 
 		// Port scanning (host-level listening ports)
 		r.Get("/ports/listening", h.ListeningPortsHandler)
+
+		// Capability detection (Phase 2 Access Profiles)
+		r.Get("/capabilities/dhcp", h.GetDHCPCapability)
+		r.Get("/capabilities/proxy", h.GetProxyCapability)
 	})
 
 	// Firewall
