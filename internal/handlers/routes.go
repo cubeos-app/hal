@@ -189,6 +189,9 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 
 	// Hardware Detection
 	r.Get("/hardware/interfaces", h.DetectInterfaces)
+	r.Get("/hardware/wifi-ap/whitelist", h.GetWiFiAPWhitelist)
+	r.Get("/hardware/wifi-ap/blacklist", h.GetWiFiAPBlacklist)
+	r.Post("/hardware/wifi-ap/retest/*", h.RetestWiFiAdapter)
 
 	// Support bundle
 	r.Get("/support/bundle.zip", h.GetSupportBundle)

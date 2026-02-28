@@ -23,6 +23,8 @@ type DetectedInterface struct {
 	APCapable bool   `json:"ap_capable"` // WiFi: supports AP mode
 	Role      string `json:"role"`       // "ap" | "uplink" | "unassigned"
 	PhyName   string `json:"phy_name,omitempty"`
+	VendorID  string `json:"vendor_id,omitempty"`  // USB idVendor (e.g. "0bda")
+	ProductID string `json:"product_id,omitempty"` // USB idProduct (e.g. "8812")
 }
 
 // InterfaceDetectionResponse is the response for GET /hardware/interfaces.
@@ -72,9 +74,6 @@ func (h *HALHandler) DetectInterfaces(w http.ResponseWriter, r *http.Request) {
 		if isWiFiInterface(name) {
 			iface.Type = "wifi"
 			iface.PhyName = detectPhyName(name)
-			if iface.PhyName != "" {
-				iface.APCapable = checkAPSupport(ctx, iface.PhyName)
-			}
 		} else if hasDeviceDir(name) {
 			iface.Type = "ethernet"
 		} else if looksLikeEthernet(name) {
@@ -87,6 +86,21 @@ func (h *HALHandler) DetectInterfaces(w http.ResponseWriter, r *http.Request) {
 		// Detect bus type
 		iface.Bus = detectBusType(name)
 		iface.BuiltIn = iface.Bus == "sdio" || iface.Bus == "pci" || iface.Bus == "platform"
+
+		// Read USB device IDs
+		if iface.Bus == "usb" {
+			iface.VendorID, iface.ProductID = readUSBDeviceID(name)
+		}
+
+		// AP capability check: USB WiFi uses two-stage test with whitelist/blacklist,
+		// built-in WiFi uses single-stage iw phy check
+		if iface.Type == "wifi" && iface.PhyName != "" {
+			if iface.Bus == "usb" && iface.VendorID != "" {
+				iface.APCapable = checkAndRecordAPCapability(ctx, iface)
+			} else {
+				iface.APCapable = checkAPSupport(ctx, iface.PhyName)
+			}
+		}
 
 		// Read operstate
 		iface.IsUp = readOperState(name)
@@ -319,20 +333,32 @@ func assignRoles(ifaces []DetectedInterface, wifiIdxs, ethIdxs []int) bool {
 		return true
 	}
 
-	// 2 WiFi (1 built-in AP-capable, 1 USB) → built-in=AP, USB=uplink
-	if len(wifiIdxs) == 2 && len(builtInWifi) > 0 && len(usbWifi) > 0 {
-		for _, idx := range builtInWifi {
+	// 2+ WiFi (built-in + USB) → prefer USB WiFi for AP (better performance)
+	if len(wifiIdxs) >= 2 && len(builtInWifi) > 0 && len(usbWifi) > 0 {
+		apAssigned := false
+		// Prefer AP-capable USB WiFi adapter for AP role
+		for _, idx := range usbWifi {
 			if ifaces[idx].APCapable {
 				ifaces[idx].Role = "ap"
+				apAssigned = true
 				break
 			}
 		}
-		ifaces[usbWifi[0]].Role = "uplink"
-		// Also assign eth if present
+		// Fallback: use built-in WiFi for AP if no USB adapter is capable
+		if !apAssigned {
+			for _, idx := range builtInWifi {
+				if ifaces[idx].APCapable {
+					ifaces[idx].Role = "ap"
+					apAssigned = true
+					break
+				}
+			}
+		}
+		// Assign eth as uplink if present
 		if len(ethIdxs) > 0 {
 			ifaces[ethIdxs[0]].Role = "uplink"
 		}
-		return true
+		return apAssigned
 	}
 
 	// Ambiguous — mark the best AP candidate but leave unassigned
