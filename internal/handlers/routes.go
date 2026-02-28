@@ -316,6 +316,8 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 	// Bluetooth
 	r.Route("/bluetooth", func(r chi.Router) {
 		r.Get("/status", h.GetBluetoothStatus)
+		r.Get("/coexistence", h.GetBluetoothCoexistence)
+		r.Post("/rfkill", h.SetBluetoothRFKill)
 		r.Post("/power/on", h.PowerOnBluetooth)
 		r.Post("/power/off", h.PowerOffBluetooth)
 		r.Get("/devices", h.GetBluetoothDevices)

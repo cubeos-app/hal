@@ -39,13 +39,14 @@ type BluetoothDevicesResponse struct {
 // BluetoothStatus represents Bluetooth adapter status.
 // @Description Bluetooth adapter status
 type BluetoothStatus struct {
-	Available    bool   `json:"available" example:"true"`
-	Powered      bool   `json:"powered" example:"true"`
-	Discoverable bool   `json:"discoverable" example:"false"`
-	Pairable     bool   `json:"pairable" example:"true"`
-	Name         string `json:"name" example:"CubeOS"`
-	Address      string `json:"address" example:"DC:A6:32:AA:BB:CC"`
-	Alias        string `json:"alias,omitempty" example:"CubeOS"`
+	Available     bool   `json:"available" example:"true"`
+	Powered       bool   `json:"powered" example:"true"`
+	Discoverable  bool   `json:"discoverable" example:"false"`
+	Pairable      bool   `json:"pairable" example:"true"`
+	RFKillBlocked bool   `json:"rfkill_blocked" example:"false"`
+	Name          string `json:"name" example:"CubeOS"`
+	Address       string `json:"address" example:"DC:A6:32:AA:BB:CC"`
+	Alias         string `json:"alias,omitempty" example:"CubeOS"`
 }
 
 // BluetoothConnectRequest represents a Bluetooth connect request.
@@ -81,6 +82,7 @@ func (h *HALHandler) GetBluetoothStatus(w http.ResponseWriter, r *http.Request) 
 	}
 
 	status.Available = true
+	status.RFKillBlocked = isBluetoothRFKillBlocked(r.Context())
 
 	// Parse output
 	lines := strings.Split(output, "\n")
@@ -390,4 +392,122 @@ func (h *HALHandler) getPairedBluetoothDevices(ctx context.Context) []BluetoothD
 	}
 
 	return devices
+}
+
+// ============================================================================
+// Bluetooth / WiFi Coexistence
+// ============================================================================
+
+// isBluetoothRFKillBlocked checks if Bluetooth is soft-blocked via rfkill.
+func isBluetoothRFKillBlocked(ctx context.Context) bool {
+	output, err := execWithTimeout(ctx, "rfkill", "list", "bluetooth")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(output, "Soft blocked: yes")
+}
+
+// BluetoothCoexistenceStatus represents the Bluetooth/WiFi coexistence state.
+type BluetoothCoexistenceStatus struct {
+	BluetoothEnabled bool   `json:"bluetooth_enabled"`
+	RFKillBlocked    bool   `json:"rfkill_blocked"`
+	BuiltInWiFiRole  string `json:"builtin_wifi_role"`  // "ap", "client", "unused", "none"
+	ShouldBeDisabled bool   `json:"should_be_disabled"` // true when built-in WiFi is AP
+	OverrideActive   bool   `json:"override_active"`    // user forced BT on despite AP
+}
+
+// GetBluetoothCoexistence returns the Bluetooth/WiFi coexistence status.
+// @Summary Get Bluetooth coexistence status
+// @Description Returns Bluetooth state relative to WiFi AP role for SDIO bus conflict management
+// @Tags Bluetooth
+// @Produce json
+// @Success 200 {object} BluetoothCoexistenceStatus
+// @Router /bluetooth/coexistence [get]
+func (h *HALHandler) GetBluetoothCoexistence(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	status := BluetoothCoexistenceStatus{
+		BuiltInWiFiRole: "none",
+	}
+
+	// Check rfkill state
+	status.RFKillBlocked = isBluetoothRFKillBlocked(ctx)
+	status.BluetoothEnabled = !status.RFKillBlocked
+
+	// Detect built-in WiFi role from interface detection
+	entries, err := execWithTimeout(ctx, "cat", "/cubeos/config/interfaces.env")
+	if err == nil {
+		for _, line := range strings.Split(entries, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "CUBEOS_AP_INTERFACE=") {
+				apIface := strings.TrimPrefix(line, "CUBEOS_AP_INTERFACE=")
+				if strings.HasPrefix(line, "CUBEOS_BUILTIN_WIFI=") {
+					builtinWifi := strings.TrimPrefix(line, "CUBEOS_BUILTIN_WIFI=")
+					if apIface == builtinWifi && builtinWifi != "" {
+						status.BuiltInWiFiRole = "ap"
+					}
+				}
+			}
+		}
+		// Parse all values first, then determine role
+		var apIface, builtinWifi string
+		for _, line := range strings.Split(entries, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "CUBEOS_AP_INTERFACE=") {
+				apIface = strings.TrimPrefix(line, "CUBEOS_AP_INTERFACE=")
+			}
+			if strings.HasPrefix(line, "CUBEOS_BUILTIN_WIFI=") {
+				builtinWifi = strings.TrimPrefix(line, "CUBEOS_BUILTIN_WIFI=")
+			}
+		}
+		if builtinWifi == "" {
+			status.BuiltInWiFiRole = "none"
+		} else if apIface == builtinWifi {
+			status.BuiltInWiFiRole = "ap"
+		} else {
+			status.BuiltInWiFiRole = "unused"
+		}
+	}
+
+	status.ShouldBeDisabled = status.BuiltInWiFiRole == "ap"
+	status.OverrideActive = status.ShouldBeDisabled && status.BluetoothEnabled
+
+	jsonResponse(w, http.StatusOK, status)
+}
+
+// SetBluetoothRFKill blocks or unblocks Bluetooth via rfkill.
+// @Summary Set Bluetooth rfkill state
+// @Description Block or unblock the Bluetooth adapter via rfkill for WiFi AP coexistence
+// @Tags Bluetooth
+// @Accept json
+// @Produce json
+// @Param body body struct{ Block bool `json:"block"` } true "Block state"
+// @Success 200 {object} SuccessResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /bluetooth/rfkill [post]
+func (h *HALHandler) SetBluetoothRFKill(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Block bool `json:"block"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	action := "unblock"
+	if req.Block {
+		action = "block"
+	}
+
+	_, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "--", "rfkill", action, "bluetooth")
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("rfkill "+action+" bluetooth", err))
+		return
+	}
+
+	msg := "Bluetooth unblocked"
+	if req.Block {
+		msg = "Bluetooth blocked"
+	}
+	successResponse(w, msg)
 }
