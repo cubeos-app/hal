@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -196,16 +197,26 @@ func buildDHCPDiscover() []byte {
 // @Failure 500 {object} ErrorResponse
 // @Router /network/capabilities/proxy [get]
 func (h *HALHandler) GetProxyCapability(w http.ResponseWriter, r *http.Request) {
+	gatewayIP := os.Getenv("CUBEOS_GATEWAY_IP")
+	if gatewayIP == "" {
+		gatewayIP = "10.42.24.1"
+	}
+	npmPort := os.Getenv("CUBEOS_NPM_PORT")
+	if npmPort == "" {
+		npmPort = "81"
+	}
+	npmURL := "http://" + gatewayIP + ":" + npmPort
+
 	result := ProxyCapabilityResponse{
 		Available: false,
-		NPMURL:    "http://10.42.24.1:81",
+		NPMURL:    npmURL,
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("http://localhost:81/api/")
+	resp, err := client.Get("http://localhost:" + npmPort + "/api/")
 	if err != nil {
 		// Try gateway IP fallback
-		resp, err = client.Get("http://10.42.24.1:81/api/")
+		resp, err = client.Get(npmURL + "/api/")
 		if err != nil {
 			jsonResponse(w, http.StatusOK, result)
 			return

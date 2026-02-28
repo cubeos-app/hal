@@ -865,7 +865,7 @@ func detectDeviceModel(ctx context.Context) string {
 		virt := strings.TrimSpace(string(output))
 		switch virt {
 		case "lxc":
-			return "LXC Container (x86_64)"
+			return "LXC Container (" + getArchName() + ")"
 		case "kvm":
 			return "KVM Virtual Machine"
 		case "qemu":
@@ -905,12 +905,21 @@ func detectDeviceModel(ctx context.Context) string {
 		}
 	}
 
-	return "Unknown x86_64 System"
+	return "Unknown " + getArchName() + " System"
+}
+
+// getArchName returns the runtime CPU architecture (e.g. "x86_64", "aarch64").
+func getArchName() string {
+	if out, err := exec.Command("uname", "-m").Output(); err == nil {
+		return strings.TrimSpace(string(out))
+	}
+	return "unknown"
 }
 
 // detectContainerHost identifies the host virtualization type when CUBEOS_TIER=container.
 // HAL has pid:host, so /proc/1/environ contains the host init's environment.
 func detectContainerHost() string {
+	arch := getArchName()
 	// Read host PID 1 environment for container= indicator
 	if data, err := os.ReadFile("/proc/1/environ"); err == nil {
 		// environ uses NUL bytes as separators
@@ -919,11 +928,11 @@ func detectContainerHost() string {
 				virt := strings.TrimPrefix(entry, "container=")
 				switch virt {
 				case "lxc":
-					return "LXC Container (x86_64)"
+					return "LXC Container (" + arch + ")"
 				case "docker":
-					return "Docker Container (x86_64)"
+					return "Docker Container (" + arch + ")"
 				case "podman":
-					return "Podman Container (x86_64)"
+					return "Podman Container (" + arch + ")"
 				default:
 					if virt != "" {
 						return "Container (" + virt + ")"
@@ -933,7 +942,7 @@ func detectContainerHost() string {
 		}
 	}
 
-	return "x86_64 Container"
+	return arch + " Container"
 }
 
 // detectVirtFromProc reads /proc/1/environ for container= on systems with pid:host.
@@ -942,14 +951,15 @@ func detectVirtFromProc() string {
 	if err != nil {
 		return ""
 	}
+	arch := getArchName()
 	for _, entry := range strings.Split(string(data), "\x00") {
 		if strings.HasPrefix(entry, "container=") {
 			virt := strings.TrimPrefix(entry, "container=")
 			switch virt {
 			case "lxc":
-				return "LXC Container (x86_64)"
+				return "LXC Container (" + arch + ")"
 			case "docker":
-				return "Docker Container (x86_64)"
+				return "Docker Container (" + arch + ")"
 			default:
 				if virt != "" {
 					return "Container (" + virt + ")"
