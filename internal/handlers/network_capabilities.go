@@ -77,9 +77,25 @@ func (h *HALHandler) GetDHCPCapability(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, result)
 }
 
+// getUplinkInterface returns the interface used for the default route, or "eth0" as fallback.
+func getUplinkInterface(ctx context.Context) string {
+	output, err := execWithTimeout(ctx, "ip", "route", "show", "default")
+	if err == nil {
+		// Format: "default via 192.168.1.1 dev eth0 ..."
+		parts := strings.Fields(output)
+		for i, p := range parts {
+			if p == "dev" && i+1 < len(parts) {
+				return parts[i+1]
+			}
+		}
+	}
+	return "eth0"
+}
+
 // detectDHCPViaNmap uses nmap's DHCP discovery script to detect DHCP servers.
 func detectDHCPViaNmap(ctx context.Context) (string, error) {
-	output, err := execWithTimeout(ctx, "nmap", "--script", "broadcast-dhcp-discover", "-e", "eth0", "--unprivileged")
+	iface := getUplinkInterface(ctx)
+	output, err := execWithTimeout(ctx, "nmap", "--script", "broadcast-dhcp-discover", "-e", iface, "--unprivileged")
 	if err != nil {
 		return "", err
 	}
