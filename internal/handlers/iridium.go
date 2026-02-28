@@ -551,6 +551,7 @@ func (h *HALHandler) ConnectIridium(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.iridium.Connect(r.Context(), port); err != nil {
+		log.Printf("iridium: connect failed: %v", err)
 		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("connection failed: %s", sanitizeExecError("connect", err)))
 		return
 	}

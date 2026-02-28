@@ -259,28 +259,20 @@ func (d *IridiumDriver) closeLocked() {
 }
 
 // flushLocked discards any pending data in the serial buffer.
+// Uses SetDeadline to avoid leaking goroutines that steal subsequent AT responses.
 func (d *IridiumDriver) flushLocked() {
 	if d.file == nil {
 		return
 	}
 	buf := make([]byte, 4096)
-	// Non-blocking read to drain buffer — use a very short deadline
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			n, err := d.file.Read(buf)
-			if n == 0 || err != nil {
-				return
-			}
+	d.file.SetDeadline(time.Now().Add(200 * time.Millisecond))
+	for {
+		n, err := d.file.Read(buf)
+		if n == 0 || err != nil {
+			break
 		}
-	}()
-	select {
-	case <-done:
-	case <-time.After(200 * time.Millisecond):
-		// Buffer may still have data; that's OK, the short timeout
-		// just ensures we don't block forever on an empty port
 	}
+	d.file.SetDeadline(time.Time{}) // Clear deadline for subsequent operations
 }
 
 // ============================================================================
@@ -343,27 +335,23 @@ func (d *IridiumDriver) SendAT(ctx context.Context, command string, timeout time
 }
 
 // sendATLocked sends an AT command. Caller must hold d.mu.
+// Uses SetDeadline for draining to avoid leaking goroutines that would
+// race with readResponseLocked and steal the AT response.
 func (d *IridiumDriver) sendATLocked(ctx context.Context, command string, timeout time.Duration) (string, error) {
 	if d.file == nil {
 		return "", fmt.Errorf("not connected")
 	}
 
-	// Drain any pending data before sending
+	// Drain any pending data before sending (deadline-based, no goroutine leak)
+	d.file.SetDeadline(time.Now().Add(100 * time.Millisecond))
 	drainBuf := make([]byte, 1024)
-	drained := make(chan struct{})
-	go func() {
-		defer close(drained)
-		for {
-			n, _ := d.file.Read(drainBuf)
-			if n == 0 {
-				return
-			}
+	for {
+		n, err := d.file.Read(drainBuf)
+		if n == 0 || err != nil {
+			break
 		}
-	}()
-	select {
-	case <-drained:
-	case <-time.After(100 * time.Millisecond):
 	}
+	d.file.SetDeadline(time.Time{}) // Clear deadline
 
 	// Send command with CR (NO LF — Iridium protocol)
 	if _, err := d.file.WriteString(command + "\r"); err != nil {
