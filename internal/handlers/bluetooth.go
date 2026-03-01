@@ -198,9 +198,20 @@ func (h *HALHandler) PowerOffBluetooth(w http.ResponseWriter, r *http.Request) {
 // @Failure 500 {object} ErrorResponse
 // @Router /bluetooth/devices [get]
 func (h *HALHandler) GetBluetoothDevices(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	paired := h.getPairedBluetoothDevices(ctx)
+
+	// Build set of paired addresses to exclude from available list
+	pairedSet := make(map[string]bool, len(paired))
+	for _, d := range paired {
+		pairedSet[d.Address] = true
+	}
+
+	available := h.getDiscoveredBluetoothDevices(ctx, pairedSet)
+
 	response := BluetoothDevicesResponse{
-		Paired:    h.getPairedBluetoothDevices(r.Context()),
-		Available: []BluetoothDevice{},
+		Paired:    paired,
+		Available: available,
 	}
 
 	jsonResponse(w, http.StatusOK, response)
@@ -413,6 +424,67 @@ func (h *HALHandler) getPairedBluetoothDevices(ctx context.Context) []BluetoothD
 				devices = append(devices, device)
 			}
 		}
+	}
+
+	return devices
+}
+
+// getDiscoveredBluetoothDevices returns devices found by the last scan,
+// excluding any that are already paired (those appear in the Paired list).
+// Uses `bluetoothctl devices` which lists all known devices (paired + discovered).
+func (h *HALHandler) getDiscoveredBluetoothDevices(ctx context.Context, pairedSet map[string]bool) []BluetoothDevice {
+	var devices []BluetoothDevice
+
+	output, err := execWithTimeout(ctx, "bluetoothctl", "devices")
+	if err != nil {
+		return devices
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasPrefix(line, "Device ") {
+			continue
+		}
+
+		parts := strings.SplitN(line[7:], " ", 2)
+		if len(parts) < 1 {
+			continue
+		}
+
+		addr := parts[0]
+		if pairedSet[addr] {
+			continue // already in paired list
+		}
+
+		device := BluetoothDevice{
+			Address: addr,
+			Paired:  false,
+		}
+		if len(parts) >= 2 {
+			device.Name = parts[1]
+		}
+
+		// Get RSSI and other info if available
+		if infoOutput, err := execWithTimeout(ctx, "bluetoothctl", "info", addr); err == nil {
+			for _, infoLine := range strings.Split(infoOutput, "\n") {
+				infoLine = strings.TrimSpace(infoLine)
+				if strings.HasPrefix(infoLine, "RSSI:") {
+					// Parse "RSSI: 0xffffffb4 (-76)" — extract decimal value
+					if idx := strings.Index(infoLine, "("); idx >= 0 {
+						if end := strings.Index(infoLine[idx:], ")"); end >= 0 {
+							if rssi, err := strconv.Atoi(infoLine[idx+1 : idx+end]); err == nil {
+								device.RSSI = rssi
+							}
+						}
+					}
+				}
+				if strings.HasPrefix(infoLine, "Icon:") {
+					device.Class = strings.TrimPrefix(infoLine, "Icon: ")
+				}
+			}
+		}
+
+		devices = append(devices, device)
 	}
 
 	return devices
