@@ -59,19 +59,33 @@ func restoreDockerNetworking(ctx context.Context) {
 
 	// 2. Restore Docker's MASQUERADE rule for docker_gwbridge if missing.
 	// Docker creates this at startup but netplan apply can flush it.
+	// Detect the subnet dynamically — never hardcode Docker network addresses.
+	subnet, err := execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"docker", "network", "inspect", "docker_gwbridge",
+		"--format", "{{(index .IPAM.Config 0).Subnet}}")
+	if err != nil {
+		log.Printf("restoreDockerNetworking: failed to detect docker_gwbridge subnet: %v", err)
+		return
+	}
+	subnet = strings.TrimSpace(subnet)
+	if subnet == "" {
+		log.Printf("restoreDockerNetworking: docker_gwbridge subnet is empty, skipping masquerade")
+		return
+	}
+
 	// Check with -C (check) and add with -A if missing.
 	_, err = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
 		"iptables", "-t", "nat", "-C", "POSTROUTING",
-		"-s", "172.16.1.0/24", "!", "-o", "docker_gwbridge", "-j", "MASQUERADE")
+		"-s", subnet, "!", "-o", "docker_gwbridge", "-j", "MASQUERADE")
 	if err != nil {
 		// Rule missing — add it
 		_, err = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
 			"iptables", "-t", "nat", "-A", "POSTROUTING",
-			"-s", "172.16.1.0/24", "!", "-o", "docker_gwbridge", "-j", "MASQUERADE")
+			"-s", subnet, "!", "-o", "docker_gwbridge", "-j", "MASQUERADE")
 		if err != nil {
-			log.Printf("restoreDockerNetworking: failed to add masquerade rule: %v", err)
+			log.Printf("restoreDockerNetworking: failed to add masquerade rule for %s: %v", subnet, err)
 		} else {
-			log.Printf("restoreDockerNetworking: restored docker_gwbridge masquerade rule")
+			log.Printf("restoreDockerNetworking: restored docker_gwbridge masquerade rule for %s", subnet)
 		}
 	}
 }
