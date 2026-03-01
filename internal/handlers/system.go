@@ -754,6 +754,50 @@ func (h *HALHandler) StopService(w http.ResponseWriter, r *http.Request) {
 }
 
 // ============================================================================
+// Docker Compose Service Recreate
+// ============================================================================
+
+// composeServiceAllowlist restricts which Docker Compose services can be recreated.
+var composeServiceAllowlist = map[string]string{
+	"pihole": "/cubeos/coreapps/pihole/appconfig",
+}
+
+// RecreateComposeService runs `docker compose up -d` for a whitelisted service.
+// @Summary Recreate Docker Compose service
+// @Description Recreates a Docker Compose service by running `docker compose up -d` in its appconfig directory. Used when environment changes require container recreation (e.g. Pi-hole password sync).
+// @Tags System
+// @Accept json
+// @Produce json
+// @Param name path string true "Service name (must be in allowlist)" example(pihole)
+// @Success 200 {object} SuccessResponse
+// @Failure 400 {object} ErrorResponse "Invalid service name"
+// @Failure 403 {object} ErrorResponse "Service not in allowlist"
+// @Failure 500 {object} ErrorResponse
+// @Router /system/service/{name}/recreate [post]
+func (h *HALHandler) RecreateComposeService(w http.ResponseWriter, r *http.Request) {
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		errorResponse(w, http.StatusBadRequest, "service name is required")
+		return
+	}
+
+	composeDir, ok := composeServiceAllowlist[name]
+	if !ok {
+		errorResponse(w, http.StatusForbidden, fmt.Sprintf("service %q is not in the compose recreate allowlist", name))
+		return
+	}
+
+	output, err := execWithTimeout(r.Context(), "docker", "compose", "-f", composeDir+"/docker-compose.yml", "up", "-d")
+	if err != nil {
+		log.Printf("RecreateComposeService: docker compose up -d failed for %s: %v (output: %s)", name, err, output)
+		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("recreate compose service", err))
+		return
+	}
+
+	successResponse(w, fmt.Sprintf("service %s recreated via docker compose", name))
+}
+
+// ============================================================================
 // Extended System Information Handlers (Fix #13)
 // ============================================================================
 

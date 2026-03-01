@@ -43,6 +43,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/service/{name}/start", h.StartService)
 		r.Post("/service/{name}/stop", h.StopService)
 		r.Post("/service/{name}/restart", h.RestartService)
+		r.Post("/service/{name}/recreate", h.requireFullTier(h.RecreateComposeService))
 	})
 
 	// Power (Battery, UPS, RTC, Watchdog)
