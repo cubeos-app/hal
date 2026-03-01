@@ -86,13 +86,13 @@ func (h *HALHandler) GetBluetoothStatus(w http.ResponseWriter, r *http.Request) 
 		}
 
 		log.Printf("bluetooth: HCI hardware present but bluetoothd not running — starting bluetooth.service")
-		if _, startErr := execWithTimeout(r.Context(), "systemctl", "start", "bluetooth"); startErr != nil {
+		if _, startErr := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--", "systemctl", "start", "bluetooth"); startErr != nil {
 			log.Printf("bluetooth: failed to start bluetooth.service: %v", startErr)
 			errorResponse(w, http.StatusNotFound, "Bluetooth not available")
 			return
 		}
 		// Also enable so it survives reboot
-		_, _ = execWithTimeout(r.Context(), "systemctl", "enable", "bluetooth")
+		_, _ = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--", "systemctl", "enable", "bluetooth")
 
 		// Brief wait for bluetoothd to initialize
 		time.Sleep(2 * time.Second)

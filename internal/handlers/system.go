@@ -787,7 +787,8 @@ func (h *HALHandler) RecreateComposeService(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	output, err := execWithTimeout(r.Context(), "docker", "compose", "-f", composeDir+"/docker-compose.yml", "up", "-d")
+	output, err := execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--",
+		"docker", "compose", "-f", composeDir+"/docker-compose.yml", "up", "-d")
 	if err != nil {
 		log.Printf("RecreateComposeService: docker compose up -d failed for %s: %v (output: %s)", name, err, output)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("recreate compose service", err))

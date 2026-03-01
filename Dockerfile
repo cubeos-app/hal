@@ -49,6 +49,8 @@ RUN apk add --no-cache \
     e2fsprogs \
     dosfstools \
     ntfs-3g \
+    # Bluetooth tools
+    bluez \
     # Mount tools
     cifs-utils \
     nfs-utils
