@@ -168,18 +168,76 @@ func (h *HALHandler) GetInterface(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var iface []interface{}
-	if err := json.Unmarshal([]byte(output), &iface); err != nil {
+	// Parse raw ip -j addr output (same structure as ListInterfaces)
+	var rawInterfaces []struct {
+		IfName   string   `json:"ifname"`
+		Flags    []string `json:"flags"`
+		MTU      int      `json:"mtu"`
+		Address  string   `json:"address"`
+		LinkType string   `json:"link_type"`
+		AddrInfo []struct {
+			Family    string `json:"family"`
+			Local     string `json:"local"`
+			PrefixLen int    `json:"prefixlen"`
+		} `json:"addr_info"`
+	}
+
+	if err := json.Unmarshal([]byte(output), &rawInterfaces); err != nil {
 		log.Printf("GetInterface(%s): parse error: %v", name, err)
 		errorResponse(w, http.StatusInternalServerError, "failed to parse interface")
 		return
 	}
 
-	if len(iface) > 0 {
-		jsonResponse(w, http.StatusOK, iface[0])
-	} else {
-		jsonResponse(w, http.StatusOK, map[string]interface{}{})
+	if len(rawInterfaces) == 0 {
+		errorResponse(w, http.StatusNotFound, "interface not found")
+		return
 	}
+
+	// Transform to structured format (same as ListInterfaces)
+	raw := rawInterfaces[0]
+	result := struct {
+		Name          string   `json:"name"`
+		IsUp          bool     `json:"is_up"`
+		MACAddress    string   `json:"mac_address"`
+		IPv4Addresses []string `json:"ipv4_addresses"`
+		IPv6Addresses []string `json:"ipv6_addresses"`
+		MTU           int      `json:"mtu"`
+		IsWireless    bool     `json:"is_wireless"`
+	}{
+		Name:       raw.IfName,
+		MACAddress: raw.Address,
+		MTU:        raw.MTU,
+	}
+
+	for _, flag := range raw.Flags {
+		if flag == "UP" {
+			result.IsUp = true
+			break
+		}
+	}
+
+	for _, addr := range raw.AddrInfo {
+		addrStr := fmt.Sprintf("%s/%d", addr.Local, addr.PrefixLen)
+		switch addr.Family {
+		case "inet":
+			result.IPv4Addresses = append(result.IPv4Addresses, addrStr)
+		case "inet6":
+			result.IPv6Addresses = append(result.IPv6Addresses, addrStr)
+		}
+	}
+
+	if result.IPv4Addresses == nil {
+		result.IPv4Addresses = []string{}
+	}
+	if result.IPv6Addresses == nil {
+		result.IPv6Addresses = []string{}
+	}
+
+	if strings.HasPrefix(raw.IfName, "wlan") || strings.HasPrefix(raw.IfName, "wlx") || strings.HasPrefix(raw.IfName, "wlp") {
+		result.IsWireless = true
+	}
+
+	jsonResponse(w, http.StatusOK, result)
 }
 
 // GetInterfaceTraffic returns traffic statistics for a specific interface
