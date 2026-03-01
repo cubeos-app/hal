@@ -45,6 +45,37 @@ func execWpaCli(ctx context.Context, args ...string) (string, error) {
 	return execWithTimeout(ctx, "nsenter", nsenterArgs...)
 }
 
+// restoreDockerNetworking restores kernel and iptables state that Docker Swarm
+// depends on after netplan apply. netplan apply resets sysctl (disabling ip_forward)
+// and can flush Docker's MASQUERADE rules, breaking both inbound port access and
+// outbound internet for containers.
+func restoreDockerNetworking(ctx context.Context) {
+	// 1. Restore IP forwarding
+	_, err := execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"sysctl", "-w", "net.ipv4.ip_forward=1")
+	if err != nil {
+		log.Printf("restoreDockerNetworking: failed to restore ip_forward: %v", err)
+	}
+
+	// 2. Restore Docker's MASQUERADE rule for docker_gwbridge if missing.
+	// Docker creates this at startup but netplan apply can flush it.
+	// Check with -C (check) and add with -A if missing.
+	_, err = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"iptables", "-t", "nat", "-C", "POSTROUTING",
+		"-s", "172.16.1.0/24", "!", "-o", "docker_gwbridge", "-j", "MASQUERADE")
+	if err != nil {
+		// Rule missing — add it
+		_, err = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+			"iptables", "-t", "nat", "-A", "POSTROUTING",
+			"-s", "172.16.1.0/24", "!", "-o", "docker_gwbridge", "-j", "MASQUERADE")
+		if err != nil {
+			log.Printf("restoreDockerNetworking: failed to add masquerade rule: %v", err)
+		} else {
+			log.Printf("restoreDockerNetworking: restored docker_gwbridge masquerade rule")
+		}
+	}
+}
+
 // ListInterfaces returns all network interfaces
 // @Summary List network interfaces
 // @Description Returns all network interfaces with their status
@@ -1602,13 +1633,8 @@ func (h *HALHandler) WriteNetplan(w http.ResponseWriter, r *http.Request) {
 		// Non-fatal — netplan is written, will take effect on reboot
 	}
 
-	// netplan apply resets sysctl values — restore IP forwarding which Docker
-	// needs for port-published Swarm services to be reachable externally.
-	_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
-		"sysctl", "-w", "net.ipv4.ip_forward=1")
-	if err != nil {
-		log.Printf("WriteNetplan: failed to restore ip_forward: %v", err)
-	}
+	// netplan apply resets sysctl and can flush Docker's iptables rules.
+	restoreDockerNetworking(r.Context())
 
 	// Optionally reconfigure a specific interface (e.g., after netplan apply,
 	// give networkd an extra nudge for the target interface)
@@ -2021,9 +2047,8 @@ func (h *HALHandler) RevertToAP(w http.ResponseWriter, r *http.Request) {
 		// Non-fatal — continue to start hostapd
 	}
 
-	// netplan apply resets sysctl — restore IP forwarding for Docker
-	_, _ = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
-		"sysctl", "-w", "net.ipv4.ip_forward=1")
+	// netplan apply resets sysctl and can flush Docker's iptables rules.
+	restoreDockerNetworking(context.Background())
 
 	// 5. Start hostapd
 	_, err = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
