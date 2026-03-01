@@ -647,6 +647,289 @@ type MeshtasticRawRequest struct {
 }
 
 // ============================================================================
+// Admin Commands
+// ============================================================================
+
+// AdminRebootMeshtasticNode godoc
+// @Summary Reboot a Meshtastic node
+// @Description Sends an admin reboot command to a local or remote mesh node
+// @Tags Meshtastic
+// @Accept json
+// @Produce json
+// @Param body body object{node_id=uint32,delay_secs=int} true "Target node and delay"
+// @Success 200 {object} map[string]string
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /meshtastic/admin/reboot [post]
+// @Security ApiKeyAuth
+func (h *HALHandler) AdminRebootMeshtasticNode(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<10)
+
+	var req struct {
+		NodeID    uint32 `json:"node_id"`
+		DelaySecs int    `json:"delay_secs"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.DelaySecs <= 0 {
+		req.DelaySecs = 5
+	}
+
+	if !h.meshtastic.IsConnected() {
+		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
+			return
+		}
+	}
+
+	if err := h.meshtastic.AdminReboot(r.Context(), req.NodeID, req.DelaySecs); err != nil {
+		log.Printf("meshtastic: admin reboot failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("reboot failed: %v", err))
+		return
+	}
+
+	successResponse(w, fmt.Sprintf("reboot command sent (delay: %ds)", req.DelaySecs))
+}
+
+// AdminFactoryResetMeshtasticNode godoc
+// @Summary Factory reset a Meshtastic node
+// @Description Sends a factory reset command — all device state returned to defaults
+// @Tags Meshtastic
+// @Accept json
+// @Produce json
+// @Param body body object{node_id=uint32} true "Target node"
+// @Success 200 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /meshtastic/admin/factory_reset [post]
+// @Security ApiKeyAuth
+func (h *HALHandler) AdminFactoryResetMeshtasticNode(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<10)
+
+	var req struct {
+		NodeID uint32 `json:"node_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if !h.meshtastic.IsConnected() {
+		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
+			return
+		}
+	}
+
+	if err := h.meshtastic.AdminFactoryReset(r.Context(), req.NodeID); err != nil {
+		log.Printf("meshtastic: admin factory reset failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("factory reset failed: %v", err))
+		return
+	}
+
+	successResponse(w, "factory reset command sent")
+}
+
+// TracerouteMeshtasticNode godoc
+// @Summary Traceroute to a Meshtastic node
+// @Description Sends a traceroute request to discover the path to a destination node
+// @Tags Meshtastic
+// @Accept json
+// @Produce json
+// @Param body body object{node_id=uint32} true "Destination node"
+// @Success 200 {object} map[string]string
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /meshtastic/admin/traceroute [post]
+// @Security ApiKeyAuth
+func (h *HALHandler) TracerouteMeshtasticNode(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<10)
+
+	var req struct {
+		NodeID uint32 `json:"node_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.NodeID == 0 {
+		errorResponse(w, http.StatusBadRequest, "node_id is required")
+		return
+	}
+
+	if !h.meshtastic.IsConnected() {
+		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
+			return
+		}
+	}
+
+	if err := h.meshtastic.Traceroute(r.Context(), req.NodeID); err != nil {
+		log.Printf("meshtastic: traceroute failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("traceroute failed: %v", err))
+		return
+	}
+
+	successResponse(w, "traceroute request sent")
+}
+
+// SetMeshtasticRadioConfig godoc
+// @Summary Set Meshtastic radio configuration
+// @Description Sends radio configuration (LoRa, device, position, power, etc.)
+// @Tags Meshtastic
+// @Accept json
+// @Produce json
+// @Param body body object{config_data=string} true "Base64-encoded protobuf Config"
+// @Success 200 {object} map[string]string
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /meshtastic/config/radio [post]
+// @Security ApiKeyAuth
+func (h *HALHandler) SetMeshtasticRadioConfig(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 4<<10)
+
+	var req struct {
+		ConfigData string `json:"config_data"` // base64-encoded protobuf
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ConfigData == "" {
+		errorResponse(w, http.StatusBadRequest, "config_data is required")
+		return
+	}
+
+	data, err := base64.StdEncoding.DecodeString(req.ConfigData)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "config_data must be valid base64")
+		return
+	}
+
+	if !h.meshtastic.IsConnected() {
+		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
+			return
+		}
+	}
+
+	if err := h.meshtastic.SetRadioConfig(r.Context(), data); err != nil {
+		log.Printf("meshtastic: set radio config failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("set radio config failed: %v", err))
+		return
+	}
+
+	successResponse(w, "radio config applied")
+}
+
+// SetMeshtasticModuleConfig godoc
+// @Summary Set Meshtastic module configuration
+// @Description Sends module configuration (MQTT, serial, telemetry, etc.)
+// @Tags Meshtastic
+// @Accept json
+// @Produce json
+// @Param body body object{config_data=string} true "Base64-encoded protobuf ModuleConfig"
+// @Success 200 {object} map[string]string
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /meshtastic/config/module [post]
+// @Security ApiKeyAuth
+func (h *HALHandler) SetMeshtasticModuleConfig(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 4<<10)
+
+	var req struct {
+		ConfigData string `json:"config_data"` // base64-encoded protobuf
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ConfigData == "" {
+		errorResponse(w, http.StatusBadRequest, "config_data is required")
+		return
+	}
+
+	data, err := base64.StdEncoding.DecodeString(req.ConfigData)
+	if err != nil {
+		errorResponse(w, http.StatusBadRequest, "config_data must be valid base64")
+		return
+	}
+
+	if !h.meshtastic.IsConnected() {
+		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
+			return
+		}
+	}
+
+	if err := h.meshtastic.SetModuleConfig(r.Context(), data); err != nil {
+		log.Printf("meshtastic: set module config failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("set module config failed: %v", err))
+		return
+	}
+
+	successResponse(w, "module config applied")
+}
+
+// SendMeshtasticWaypoint godoc
+// @Summary Send a waypoint to the mesh
+// @Description Broadcasts a waypoint with GPS coordinates to the Meshtastic network
+// @Tags Meshtastic
+// @Accept json
+// @Produce json
+// @Param body body MeshtasticWaypoint true "Waypoint to send"
+// @Success 200 {object} map[string]string
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /meshtastic/waypoints [post]
+// @Security ApiKeyAuth
+func (h *HALHandler) SendMeshtasticWaypoint(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 2<<10)
+
+	var wp MeshtasticWaypoint
+	if err := json.NewDecoder(r.Body).Decode(&wp); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if wp.Name == "" {
+		errorResponse(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if wp.Latitude == 0 && wp.Longitude == 0 {
+		errorResponse(w, http.StatusBadRequest, "latitude and longitude are required")
+		return
+	}
+
+	if !h.meshtastic.IsConnected() {
+		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
+			return
+		}
+	}
+
+	if err := h.meshtastic.SendWaypoint(r.Context(), wp); err != nil {
+		log.Printf("meshtastic: send waypoint failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("send waypoint failed: %v", err))
+		return
+	}
+
+	successResponse(w, fmt.Sprintf("waypoint '%s' sent", wp.Name))
+}
+
+// ============================================================================
 // Helpers
 // ============================================================================
 

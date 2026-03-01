@@ -233,6 +233,18 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/events", h.StreamMeshtasticEvents)
 		r.Post("/channel", h.SetMeshtasticChannel)
 		r.Get("/config", h.GetMeshtasticConfig)
+
+		// Admin commands
+		r.Post("/admin/reboot", h.AdminRebootMeshtasticNode)
+		r.Post("/admin/factory_reset", h.AdminFactoryResetMeshtasticNode)
+		r.Post("/admin/traceroute", h.TracerouteMeshtasticNode)
+
+		// Radio/module config
+		r.Post("/config/radio", h.SetMeshtasticRadioConfig)
+		r.Post("/config/module", h.SetMeshtasticModuleConfig)
+
+		// Waypoints
+		r.Post("/waypoints", h.SendMeshtasticWaypoint)
 	})
 
 	// Iridium

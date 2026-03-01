@@ -75,21 +75,30 @@ type MeshtasticDriver struct {
 // MeshNode represents a node in the Meshtastic mesh network.
 // @Description Meshtastic mesh network node
 type MeshNode struct {
-	Num          uint32  `json:"num"`
-	UserID       string  `json:"user_id,omitempty" example:"!a1b2c3d4"`
-	LongName     string  `json:"long_name,omitempty" example:"CubeOS Node"`
-	ShortName    string  `json:"short_name,omitempty" example:"CUBE"`
-	HWModel      int     `json:"hw_model,omitempty"`
-	HWModelName  string  `json:"hw_model_name,omitempty" example:"HELTEC_V3"`
-	Latitude     float64 `json:"latitude,omitempty" example:"52.3676"`
-	Longitude    float64 `json:"longitude,omitempty" example:"4.9041"`
-	Altitude     int32   `json:"altitude,omitempty" example:"10"`
-	Sats         int     `json:"sats,omitempty" example:"8"`
-	BatteryLevel int     `json:"battery_level,omitempty" example:"85"`
-	Voltage      float32 `json:"voltage,omitempty" example:"4.1"`
-	SNR          float32 `json:"snr,omitempty" example:"10.5"`
-	LastHeard    int64   `json:"last_heard,omitempty"`
-	LastHeardStr string  `json:"last_heard_str,omitempty" example:"2026-02-08T12:00:00Z"`
+	Num             uint32   `json:"num"`
+	UserID          string   `json:"user_id,omitempty" example:"!a1b2c3d4"`
+	LongName        string   `json:"long_name,omitempty" example:"CubeOS Node"`
+	ShortName       string   `json:"short_name,omitempty" example:"CUBE"`
+	HWModel         int      `json:"hw_model,omitempty"`
+	HWModelName     string   `json:"hw_model_name,omitempty" example:"HELTEC_V3"`
+	Latitude        float64  `json:"latitude,omitempty" example:"52.3676"`
+	Longitude       float64  `json:"longitude,omitempty" example:"4.9041"`
+	Altitude        int32    `json:"altitude,omitempty" example:"10"`
+	Sats            int      `json:"sats,omitempty" example:"8"`
+	BatteryLevel    int      `json:"battery_level,omitempty" example:"85"`
+	Voltage         float32  `json:"voltage,omitempty" example:"4.1"`
+	ChannelUtil     float32  `json:"channel_util,omitempty" example:"3.5"`
+	AirUtilTx       float32  `json:"air_util_tx,omitempty" example:"1.2"`
+	Temperature     *float32 `json:"temperature,omitempty" example:"22.5"`
+	Humidity        *float32 `json:"humidity,omitempty" example:"55.0"`
+	Pressure        *float32 `json:"pressure,omitempty" example:"1013.25"`
+	UptimeSeconds   int      `json:"uptime_seconds,omitempty" example:"3600"`
+	SNR             float32  `json:"snr,omitempty" example:"10.5"`
+	RSSI            int32    `json:"rssi,omitempty" example:"-85"`
+	SignalQuality   string   `json:"signal_quality,omitempty" example:"GOOD"`
+	DiagnosticNotes string   `json:"diagnostic_notes,omitempty"`
+	LastHeard       int64    `json:"last_heard,omitempty"`
+	LastHeardStr    string   `json:"last_heard_str,omitempty" example:"2026-02-08T12:00:00Z"`
 }
 
 // MeshMessage represents a decoded mesh message.
@@ -546,6 +555,13 @@ func (d *MeshtasticDriver) updateNodeFromPacket(pkt *ProtoMeshPacket) {
 	if pkt.RxSNR != 0 {
 		node.SNR = pkt.RxSNR
 	}
+	if pkt.RxRSSI != 0 {
+		node.RSSI = pkt.RxRSSI
+	}
+	// Compute signal quality from latest RSSI and SNR
+	if node.RSSI != 0 || node.SNR != 0 {
+		node.SignalQuality, node.DiagnosticNotes = computeSignalQuality(float64(node.RSSI), float64(node.SNR))
+	}
 
 	switch pkt.Decoded.PortNum {
 	case PortNumPosition:
@@ -575,6 +591,28 @@ func (d *MeshtasticDriver) updateNodeFromPacket(pkt *ProtoMeshPacket) {
 			}
 			if dm.Voltage > 0 {
 				node.Voltage = dm.Voltage
+			}
+			if dm.ChannelUtil > 0 {
+				node.ChannelUtil = dm.ChannelUtil
+			}
+			if dm.AirUtilTx > 0 {
+				node.AirUtilTx = dm.AirUtilTx
+			}
+			if dm.UptimeSeconds > 0 {
+				node.UptimeSeconds = int(dm.UptimeSeconds)
+			}
+		}
+		// Try environment metrics (field 2 in Telemetry message)
+		env, err := parseEnvironmentMetrics(pkt.Decoded.Payload)
+		if err == nil {
+			if env.Temperature != 0 {
+				node.Temperature = &env.Temperature
+			}
+			if env.Humidity != 0 {
+				node.Humidity = &env.Humidity
+			}
+			if env.Pressure != 0 {
+				node.Pressure = &env.Pressure
 			}
 		}
 	}
@@ -1252,6 +1290,154 @@ func (d *MeshtasticDriver) SetChannel(ctx context.Context, ch ChannelConfig) err
 	return nil
 }
 
+// AdminReboot sends a reboot command to a node.
+// AdminMessage field 97 = reboot_seconds (int32).
+// If destNode == myNodeNum or destNode == 0, reboots the local node.
+func (d *MeshtasticDriver) AdminReboot(ctx context.Context, destNode uint32, delaySecs int) error {
+	d.mu.RLock()
+	if !d.connected || d.transport == nil {
+		d.mu.RUnlock()
+		return fmt.Errorf("not connected to Meshtastic device")
+	}
+	myNode := d.myNodeNum
+	d.mu.RUnlock()
+
+	if myNode == 0 {
+		return fmt.Errorf("own node number not known")
+	}
+	if destNode == 0 {
+		destNode = myNode
+	}
+
+	toRadio := buildAdminRebootToRadio(myNode, destNode, delaySecs)
+	if err := d.transport.SendToRadio(toRadio); err != nil {
+		return fmt.Errorf("send reboot failed: %w", err)
+	}
+	return nil
+}
+
+// AdminFactoryReset sends a factory reset command to a node.
+// AdminMessage field 94 = factory_reset_device (int32).
+func (d *MeshtasticDriver) AdminFactoryReset(ctx context.Context, destNode uint32) error {
+	d.mu.RLock()
+	if !d.connected || d.transport == nil {
+		d.mu.RUnlock()
+		return fmt.Errorf("not connected to Meshtastic device")
+	}
+	myNode := d.myNodeNum
+	d.mu.RUnlock()
+
+	if myNode == 0 {
+		return fmt.Errorf("own node number not known")
+	}
+	if destNode == 0 {
+		destNode = myNode
+	}
+
+	toRadio := buildAdminFactoryResetToRadio(myNode, destNode)
+	if err := d.transport.SendToRadio(toRadio); err != nil {
+		return fmt.Errorf("send factory reset failed: %w", err)
+	}
+	return nil
+}
+
+// Traceroute sends a traceroute request to a destination node.
+// Uses portnum TRACEROUTE_APP (70) with the destination's node number as payload.
+func (d *MeshtasticDriver) Traceroute(ctx context.Context, destNode uint32) error {
+	d.mu.RLock()
+	if !d.connected || d.transport == nil {
+		d.mu.RUnlock()
+		return fmt.Errorf("not connected to Meshtastic device")
+	}
+	d.mu.RUnlock()
+
+	if destNode == 0 {
+		return fmt.Errorf("destination node required for traceroute")
+	}
+
+	// Traceroute payload is the RouteDiscovery message (empty — firmware populates route)
+	payload := []byte{}
+	packet := buildRawPacket(payload, PortNumTraceroute, destNode, 0, true)
+	toRadio := buildToRadioPacket(packet)
+	if err := d.transport.SendToRadio(toRadio); err != nil {
+		return fmt.Errorf("send traceroute failed: %w", err)
+	}
+	return nil
+}
+
+// SetRadioConfig sends radio configuration via AdminMessage field 34 (set_config).
+// The configData is a raw protobuf-encoded Config submessage.
+func (d *MeshtasticDriver) SetRadioConfig(ctx context.Context, configData []byte) error {
+	d.mu.RLock()
+	if !d.connected || d.transport == nil {
+		d.mu.RUnlock()
+		return fmt.Errorf("not connected to Meshtastic device")
+	}
+	myNode := d.myNodeNum
+	d.mu.RUnlock()
+
+	if myNode == 0 {
+		return fmt.Errorf("own node number not known")
+	}
+
+	toRadio := buildAdminSetConfigToRadio(myNode, configData)
+	if err := d.transport.SendToRadio(toRadio); err != nil {
+		return fmt.Errorf("send radio config failed: %w", err)
+	}
+	return nil
+}
+
+// SetModuleConfig sends module configuration via AdminMessage field 35 (set_module_config).
+// The configData is a raw protobuf-encoded ModuleConfig submessage.
+func (d *MeshtasticDriver) SetModuleConfig(ctx context.Context, configData []byte) error {
+	d.mu.RLock()
+	if !d.connected || d.transport == nil {
+		d.mu.RUnlock()
+		return fmt.Errorf("not connected to Meshtastic device")
+	}
+	myNode := d.myNodeNum
+	d.mu.RUnlock()
+
+	if myNode == 0 {
+		return fmt.Errorf("own node number not known")
+	}
+
+	toRadio := buildAdminSetModuleConfigToRadio(myNode, configData)
+	if err := d.transport.SendToRadio(toRadio); err != nil {
+		return fmt.Errorf("send module config failed: %w", err)
+	}
+	return nil
+}
+
+// SendWaypoint sends a waypoint to the mesh network via portnum WAYPOINT_APP (8).
+func (d *MeshtasticDriver) SendWaypoint(ctx context.Context, wp MeshtasticWaypoint) error {
+	d.mu.RLock()
+	if !d.connected || d.transport == nil {
+		d.mu.RUnlock()
+		return fmt.Errorf("not connected to Meshtastic device")
+	}
+	d.mu.RUnlock()
+
+	payload := buildWaypointPayload(wp)
+	packet := buildRawPacket(payload, PortNumWaypoint, 0xFFFFFFFF, 0, true)
+	toRadio := buildToRadioPacket(packet)
+	if err := d.transport.SendToRadio(toRadio); err != nil {
+		return fmt.Errorf("send waypoint failed: %w", err)
+	}
+	return nil
+}
+
+// MeshtasticWaypoint represents a waypoint to send to the mesh.
+type MeshtasticWaypoint struct {
+	ID          uint32  `json:"id"`
+	Name        string  `json:"name" example:"Base Camp"`
+	Description string  `json:"description,omitempty" example:"Main camp location"`
+	Latitude    float64 `json:"latitude" example:"52.3676"`
+	Longitude   float64 `json:"longitude" example:"4.9041"`
+	Icon        uint32  `json:"icon,omitempty"`
+	Expire      uint32  `json:"expire,omitempty"`
+}
+
 // buildSetChannelToRadio builds a complete ToRadio message containing an AdminMessage
 // with set_channel (field 2) to configure a Meshtastic channel.
 //
@@ -1343,6 +1529,125 @@ func buildSetChannelToRadio(myNodeNum uint32, ch ChannelConfig) []byte {
 	return buildToRadioPacket(pkt)
 }
 
+// buildAdminRebootToRadio builds a ToRadio with AdminMessage field 97 (reboot_seconds).
+func buildAdminRebootToRadio(myNodeNum, destNode uint32, delaySecs int) []byte {
+	// AdminMessage field 97: reboot_seconds (int32)
+	// Tag = (97 << 3) | 0 = 776 = varint-encoded
+	admin := make([]byte, 0, 16)
+	admin = appendVarint(admin, 97<<3|0) // field 97, varint
+	admin = appendVarint(admin, uint64(delaySecs))
+
+	return buildAdminToRadio(myNodeNum, destNode, admin)
+}
+
+// buildAdminFactoryResetToRadio builds a ToRadio with AdminMessage field 94 (factory_reset_device).
+func buildAdminFactoryResetToRadio(myNodeNum, destNode uint32) []byte {
+	// AdminMessage field 94: factory_reset_device (int32, value 1 = trigger)
+	admin := make([]byte, 0, 16)
+	admin = appendVarint(admin, 94<<3|0) // field 94, varint
+	admin = appendVarint(admin, 1)
+
+	return buildAdminToRadio(myNodeNum, destNode, admin)
+}
+
+// buildAdminSetConfigToRadio builds a ToRadio with AdminMessage field 34 (set_config).
+func buildAdminSetConfigToRadio(myNodeNum uint32, configData []byte) []byte {
+	// AdminMessage field 34: set_config (Config, length-delimited)
+	admin := make([]byte, 0, len(configData)+8)
+	admin = appendVarint(admin, 34<<3|2) // field 34, length-delimited
+	admin = appendVarint(admin, uint64(len(configData)))
+	admin = append(admin, configData...)
+
+	return buildAdminToRadio(myNodeNum, myNodeNum, admin)
+}
+
+// buildAdminSetModuleConfigToRadio builds a ToRadio with AdminMessage field 35 (set_module_config).
+func buildAdminSetModuleConfigToRadio(myNodeNum uint32, configData []byte) []byte {
+	// AdminMessage field 35: set_module_config (ModuleConfig, length-delimited)
+	admin := make([]byte, 0, len(configData)+8)
+	admin = appendVarint(admin, 35<<3|2) // field 35, length-delimited
+	admin = appendVarint(admin, uint64(len(configData)))
+	admin = append(admin, configData...)
+
+	return buildAdminToRadio(myNodeNum, myNodeNum, admin)
+}
+
+// buildAdminToRadio wraps an AdminMessage payload into a full ToRadio packet.
+func buildAdminToRadio(myNodeNum, destNode uint32, adminPayload []byte) []byte {
+	// Data submessage: portnum=ADMIN_APP, payload=adminPayload, want_response=true
+	data := make([]byte, 0, len(adminPayload)+16)
+	data = append(data, 0x08) // Data field 1: portnum
+	data = appendVarint(data, uint64(PortNumAdminApp))
+	data = append(data, 0x12) // Data field 2: payload
+	data = appendVarint(data, uint64(len(adminPayload)))
+	data = append(data, adminPayload...)
+	data = append(data, 0x18, 0x01) // Data field 3: want_response = true
+
+	// MeshPacket
+	pkt := make([]byte, 0, len(data)+32)
+	pkt = append(pkt, 0x08) // field 1: from
+	pkt = appendVarint(pkt, uint64(myNodeNum))
+	pkt = append(pkt, 0x10) // field 2: to
+	pkt = appendVarint(pkt, uint64(destNode))
+	pkt = append(pkt, 0x22) // field 4: decoded
+	pkt = appendVarint(pkt, uint64(len(data)))
+	pkt = append(pkt, data...)
+	pkt = append(pkt, 0x38, 0x01) // field 7: want_ack
+	pkt = append(pkt, 0x48)       // field 9: hop_limit
+	pkt = appendVarint(pkt, 3)
+
+	return buildToRadioPacket(pkt)
+}
+
+// buildWaypointPayload encodes a Waypoint protobuf message.
+// Waypoint: field 1=id, 2=latitude_i (sfixed32), 3=longitude_i (sfixed32),
+// 4=expire, 6=name, 7=description, 8=icon (fixed32).
+func buildWaypointPayload(wp MeshtasticWaypoint) []byte {
+	buf := make([]byte, 0, 128)
+
+	// field 1: id (uint32)
+	if wp.ID > 0 {
+		buf = append(buf, 0x08)
+		buf = appendVarint(buf, uint64(wp.ID))
+	}
+	// field 2: latitude_i (sfixed32 — wire type 5, 4 bytes little-endian)
+	latI := int32(wp.Latitude * 1e7)
+	buf = append(buf, 0x15) // field 2, fixed32
+	b4 := make([]byte, 4)
+	binary.LittleEndian.PutUint32(b4, uint32(latI))
+	buf = append(buf, b4...)
+	// field 3: longitude_i (sfixed32)
+	lonI := int32(wp.Longitude * 1e7)
+	buf = append(buf, 0x1D) // field 3, fixed32
+	binary.LittleEndian.PutUint32(b4, uint32(lonI))
+	buf = append(buf, b4...)
+	// field 4: expire (uint32)
+	if wp.Expire > 0 {
+		buf = append(buf, 0x20)
+		buf = appendVarint(buf, uint64(wp.Expire))
+	}
+	// field 6: name (string)
+	if wp.Name != "" {
+		buf = append(buf, 0x32) // field 6, length-delimited
+		buf = appendVarint(buf, uint64(len(wp.Name)))
+		buf = append(buf, []byte(wp.Name)...)
+	}
+	// field 7: description (string)
+	if wp.Description != "" {
+		buf = append(buf, 0x3A) // field 7, length-delimited
+		buf = appendVarint(buf, uint64(len(wp.Description)))
+		buf = append(buf, []byte(wp.Description)...)
+	}
+	// field 8: icon (fixed32)
+	if wp.Icon > 0 {
+		buf = append(buf, 0x45) // field 8, fixed32
+		binary.LittleEndian.PutUint32(b4, wp.Icon)
+		buf = append(buf, b4...)
+	}
+
+	return buf
+}
+
 // ============================================================================
 // Protobuf Varint Helpers
 // ============================================================================
@@ -1365,8 +1670,10 @@ const (
 	PortNumPosition    = 3
 	PortNumNodeInfo    = 4
 	PortNumAdminApp    = 6
+	PortNumWaypoint    = 8
 	PortNumSerial      = 64
 	PortNumTelemetry   = 67
+	PortNumTraceroute  = 70
 	PortNumPrivate     = 256
 )
 
@@ -1380,10 +1687,14 @@ func portNumName(pn int) string {
 		return "NODEINFO_APP"
 	case PortNumAdminApp:
 		return "ADMIN_APP"
+	case PortNumWaypoint:
+		return "WAYPOINT_APP"
 	case PortNumTelemetry:
 		return "TELEMETRY_APP"
 	case PortNumSerial:
 		return "SERIAL_APP"
+	case PortNumTraceroute:
+		return "TRACEROUTE_APP"
 	case PortNumPrivate:
 		return "PRIVATE_APP"
 	default:
@@ -1445,6 +1756,7 @@ type ProtoMeshPacket struct {
 	Encrypted []byte
 	RxTime    uint32
 	RxSNR     float32
+	RxRSSI    int32
 	HopLimit  uint32
 	HopStart  uint32
 }
@@ -1488,8 +1800,18 @@ type ProtoPosition struct {
 
 // ProtoDeviceMetrics holds battery/voltage telemetry.
 type ProtoDeviceMetrics struct {
-	BatteryLevel uint32
-	Voltage      float32
+	BatteryLevel  uint32
+	Voltage       float32
+	ChannelUtil   float32
+	AirUtilTx     float32
+	UptimeSeconds uint32
+}
+
+// ProtoEnvironmentMetrics holds environment sensor data from PortNumTelemetry.
+type ProtoEnvironmentMetrics struct {
+	Temperature float32
+	Humidity    float32
+	Pressure    float32
 }
 
 // parseFromRadio parses raw protobuf bytes into a FromRadio struct.
@@ -1661,6 +1983,13 @@ func parseMeshPacket(data []byte) (*ProtoMeshPacket, error) {
 				return pkt, nil
 			}
 			pkt.HopStart = uint32(val)
+			pos += n
+		case 14: // rx_rssi (int32, varint with zigzag in proto but sent as sint32)
+			val, n := readVarint(data, pos)
+			if n <= 0 {
+				return pkt, nil
+			}
+			pkt.RxRSSI = int32(val)
 			pos += n
 		default:
 			pos = skipField(data, pos, wireType)
@@ -1979,6 +2308,27 @@ func parseDeviceMetricsProto(data []byte) (*ProtoDeviceMetrics, error) {
 			bits := binary.LittleEndian.Uint32(data[offset : offset+4])
 			dm.Voltage = math.Float32frombits(bits)
 			offset += 4
+		case 3: // channel_utilization (float = fixed32)
+			if offset+4 > len(data) {
+				return dm, nil
+			}
+			bits := binary.LittleEndian.Uint32(data[offset : offset+4])
+			dm.ChannelUtil = math.Float32frombits(bits)
+			offset += 4
+		case 4: // air_util_tx (float = fixed32)
+			if offset+4 > len(data) {
+				return dm, nil
+			}
+			bits := binary.LittleEndian.Uint32(data[offset : offset+4])
+			dm.AirUtilTx = math.Float32frombits(bits)
+			offset += 4
+		case 5: // uptime_seconds (uint32)
+			val, n := readVarint(data, offset)
+			if n <= 0 {
+				return dm, nil
+			}
+			dm.UptimeSeconds = uint32(val)
+			offset += n
 		default:
 			offset = skipField(data, offset, wireType)
 			if offset < 0 {
@@ -1988,6 +2338,93 @@ func parseDeviceMetricsProto(data []byte) (*ProtoDeviceMetrics, error) {
 	}
 
 	return dm, nil
+}
+
+// parseEnvironmentMetrics extracts environment sensor data from a Telemetry message.
+// Telemetry field 2 = environment_metrics submessage.
+// EnvironmentMetrics: field 1 = temperature (float), field 2 = relative_humidity (float),
+// field 3 = barometric_pressure (float).
+func parseEnvironmentMetrics(data []byte) (*ProtoEnvironmentMetrics, error) {
+	env := &ProtoEnvironmentMetrics{}
+	offset := 0
+
+	// First find the environment_metrics submessage (Telemetry field 2)
+	for offset < len(data) {
+		fieldNum, wireType, newPos, err := readTag(data, offset)
+		if err != nil {
+			return env, nil
+		}
+		offset = newPos
+
+		if fieldNum == 2 && wireType == 2 {
+			val, newPos, err := readLengthDelimited(data, offset)
+			if err != nil {
+				return env, nil
+			}
+			_ = newPos
+			return parseEnvironmentMetricsProto(val)
+		}
+		offset = skipField(data, offset, wireType)
+		if offset < 0 {
+			return env, nil
+		}
+	}
+	return env, nil
+}
+
+func parseEnvironmentMetricsProto(data []byte) (*ProtoEnvironmentMetrics, error) {
+	env := &ProtoEnvironmentMetrics{}
+	offset := 0
+
+	for offset < len(data) {
+		fieldNum, wireType, newPos, err := readTag(data, offset)
+		if err != nil {
+			return env, nil
+		}
+		offset = newPos
+
+		switch fieldNum {
+		case 1: // temperature (float = fixed32)
+			if wireType == 5 {
+				if offset+4 > len(data) {
+					return env, nil
+				}
+				bits := binary.LittleEndian.Uint32(data[offset : offset+4])
+				env.Temperature = math.Float32frombits(bits)
+				offset += 4
+			} else {
+				offset = skipField(data, offset, wireType)
+			}
+		case 2: // relative_humidity (float = fixed32)
+			if wireType == 5 {
+				if offset+4 > len(data) {
+					return env, nil
+				}
+				bits := binary.LittleEndian.Uint32(data[offset : offset+4])
+				env.Humidity = math.Float32frombits(bits)
+				offset += 4
+			} else {
+				offset = skipField(data, offset, wireType)
+			}
+		case 3: // barometric_pressure (float = fixed32)
+			if wireType == 5 {
+				if offset+4 > len(data) {
+					return env, nil
+				}
+				bits := binary.LittleEndian.Uint32(data[offset : offset+4])
+				env.Pressure = math.Float32frombits(bits)
+				offset += 4
+			} else {
+				offset = skipField(data, offset, wireType)
+			}
+		default:
+			offset = skipField(data, offset, wireType)
+			if offset < 0 {
+				return env, nil
+			}
+		}
+	}
+	return env, nil
 }
 
 // ============================================================================
@@ -2003,6 +2440,38 @@ func readTag(data []byte, pos int) (uint32, int, int, error) {
 	fieldNum := uint32(val >> 3)
 	wireType := int(val & 0x07)
 	return fieldNum, wireType, pos + n, nil
+}
+
+// computeSignalQuality determines LoRa signal quality from RSSI and SNR values.
+// Uses thresholds from the Meshtastic project:
+//   - GOOD: SNR >= -7 and RSSI >= -115
+//   - FAIR: SNR >= -15 and RSSI >= -126
+//   - BAD: anything else
+func computeSignalQuality(rssi, snr float64) (quality string, notes string) {
+	switch {
+	case snr >= -7 && rssi >= -115:
+		quality = "GOOD"
+	case snr >= -15 && rssi >= -126:
+		quality = "FAIR"
+	default:
+		quality = "BAD"
+	}
+
+	var parts []string
+	if rssi < -126 {
+		parts = append(parts, "very weak signal — consider moving the antenna or reducing distance")
+	} else if rssi < -115 {
+		parts = append(parts, "marginal signal strength")
+	}
+	if snr < -15 {
+		parts = append(parts, "high noise floor — check for interference sources")
+	} else if snr < -7 {
+		parts = append(parts, "moderate noise present")
+	}
+	if len(parts) > 0 {
+		notes = strings.Join(parts, "; ")
+	}
+	return quality, notes
 }
 
 // readVarint reads a protobuf varint and returns (value, bytesConsumed).
