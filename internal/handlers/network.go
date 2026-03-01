@@ -1602,6 +1602,14 @@ func (h *HALHandler) WriteNetplan(w http.ResponseWriter, r *http.Request) {
 		// Non-fatal — netplan is written, will take effect on reboot
 	}
 
+	// netplan apply resets sysctl values — restore IP forwarding which Docker
+	// needs for port-published Swarm services to be reachable externally.
+	_, err = execWithTimeout(r.Context(), "nsenter", "-t", "1", "-m", "-n", "--",
+		"sysctl", "-w", "net.ipv4.ip_forward=1")
+	if err != nil {
+		log.Printf("WriteNetplan: failed to restore ip_forward: %v", err)
+	}
+
 	// Optionally reconfigure a specific interface (e.g., after netplan apply,
 	// give networkd an extra nudge for the target interface)
 	if req.ReconfigureIface != "" {
@@ -2012,6 +2020,10 @@ func (h *HALHandler) RevertToAP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("RevertToAP: netplan apply failed: %v", err)
 		// Non-fatal — continue to start hostapd
 	}
+
+	// netplan apply resets sysctl — restore IP forwarding for Docker
+	_, _ = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
+		"sysctl", "-w", "net.ipv4.ip_forward=1")
 
 	// 5. Start hostapd
 	_, err = execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "-n", "--",
