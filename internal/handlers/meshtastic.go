@@ -450,6 +450,11 @@ func (h *HALHandler) StreamMeshtasticEvents(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Disable the server's WriteTimeout for this long-lived SSE stream.
+	// Without this, Go's http.Server.WriteTimeout (90s) kills the connection.
+	rc := http.NewResponseController(w)
+	rc.SetWriteDeadline(time.Time{}) // zero = no deadline
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -468,11 +473,21 @@ func (h *HALHandler) StreamMeshtasticEvents(w http.ResponseWriter, r *http.Reque
 	eventCh, unsubscribe := h.meshtastic.SubscribeEvents()
 	defer unsubscribe()
 
+	// Keepalive ticker — send SSE comment every 30s to detect dead connections.
+	keepalive := time.NewTicker(30 * time.Second)
+	defer keepalive.Stop()
+
 	ctx := r.Context()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-keepalive.C:
+			// SSE comment line — ignored by clients, keeps connection alive
+			if _, err := fmt.Fprint(w, ":keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case event, ok := <-eventCh:
 			if !ok {
 				return // Channel closed
