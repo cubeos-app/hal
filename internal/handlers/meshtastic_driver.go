@@ -973,14 +973,14 @@ func buildRawPacket(payload []byte, portnum int, to uint32, channel uint32, want
 func buildMeshPacket(decodedData []byte, to uint32, channel uint32) []byte {
 	pkt := make([]byte, 0, len(decodedData)+32)
 
-	// MeshPacket field 2: to (uint32)
+	// MeshPacket field 2: to (fixed32 — wire type 5)
 	if to == 0 {
 		to = 0xFFFFFFFF // Broadcast
 	}
-	pkt = append(pkt, 0x10) // field 2, varint
-	pkt = appendVarint(pkt, uint64(to))
+	pkt = append(pkt, 0x15) // field 2, wire type 5 (I32)
+	pkt = appendFixed32(pkt, to)
 
-	// MeshPacket field 3: channel (uint32) — only if non-zero
+	// MeshPacket field 3: channel (uint32, varint) — only if non-zero
 	if channel > 0 {
 		pkt = append(pkt, 0x18) // field 3, varint
 		pkt = appendVarint(pkt, uint64(channel))
@@ -995,7 +995,15 @@ func buildMeshPacket(decodedData []byte, to uint32, channel uint32) []byte {
 	pkt = append(pkt, 0x48) // field 9, varint
 	pkt = appendVarint(pkt, 3)
 
+	// MeshPacket field 10: want_ack (bool) = true
+	pkt = append(pkt, 0x50, 0x01) // field 10, varint 1
+
 	return pkt
+}
+
+// appendFixed32 appends a uint32 as 4 bytes little-endian (protobuf fixed32).
+func appendFixed32(buf []byte, v uint32) []byte {
+	return append(buf, byte(v), byte(v>>8), byte(v>>16), byte(v>>24))
 }
 
 // ============================================================================
@@ -1575,18 +1583,18 @@ func buildSetChannelToRadio(myNodeNum uint32, ch ChannelConfig) []byte {
 
 	// Step 5: Build MeshPacket (self-addressed admin packet)
 	pkt := make([]byte, 0, len(data)+32)
-	// MeshPacket field 1: from (uint32)
-	pkt = append(pkt, 0x08) // field 1, varint
-	pkt = appendVarint(pkt, uint64(myNodeNum))
-	// MeshPacket field 2: to (uint32)
-	pkt = append(pkt, 0x10) // field 2, varint
-	pkt = appendVarint(pkt, uint64(myNodeNum))
+	// MeshPacket field 1: from (fixed32, wire type 5)
+	pkt = append(pkt, 0x0D) // field 1, wire type 5 (I32)
+	pkt = appendFixed32(pkt, myNodeNum)
+	// MeshPacket field 2: to (fixed32, wire type 5)
+	pkt = append(pkt, 0x15) // field 2, wire type 5 (I32)
+	pkt = appendFixed32(pkt, myNodeNum)
 	// MeshPacket field 4: decoded (Data, length-delimited)
 	pkt = append(pkt, 0x22) // field 4, length-delimited
 	pkt = appendVarint(pkt, uint64(len(data)))
 	pkt = append(pkt, data...)
-	// MeshPacket field 7: want_ack = true
-	pkt = append(pkt, 0x38, 0x01) // field 7, varint 1
+	// MeshPacket field 10: want_ack = true
+	pkt = append(pkt, 0x50, 0x01) // field 10, varint 1
 	// MeshPacket field 9: hop_limit = 3
 	pkt = append(pkt, 0x48) // field 9, varint
 	pkt = appendVarint(pkt, 3)
@@ -1651,14 +1659,14 @@ func buildAdminToRadio(myNodeNum, destNode uint32, adminPayload []byte) []byte {
 
 	// MeshPacket
 	pkt := make([]byte, 0, len(data)+32)
-	pkt = append(pkt, 0x08) // field 1: from
-	pkt = appendVarint(pkt, uint64(myNodeNum))
-	pkt = append(pkt, 0x10) // field 2: to
-	pkt = appendVarint(pkt, uint64(destNode))
+	pkt = append(pkt, 0x0D) // field 1: from (fixed32, wire type 5)
+	pkt = appendFixed32(pkt, myNodeNum)
+	pkt = append(pkt, 0x15) // field 2: to (fixed32, wire type 5)
+	pkt = appendFixed32(pkt, destNode)
 	pkt = append(pkt, 0x22) // field 4: decoded
 	pkt = appendVarint(pkt, uint64(len(data)))
 	pkt = append(pkt, data...)
-	pkt = append(pkt, 0x38, 0x01) // field 7: want_ack
+	pkt = append(pkt, 0x50, 0x01) // field 10: want_ack
 	pkt = append(pkt, 0x48)       // field 9: hop_limit
 	pkt = appendVarint(pkt, 3)
 
