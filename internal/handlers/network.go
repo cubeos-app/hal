@@ -843,11 +843,13 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var networkID string
+	var savedPSK string
 
 	if existingID != "" && req.Password == "" {
 		// Saved network, no new password → just reconnect using stored credentials
 		networkID = existingID
-		log.Printf("ConnectWiFi: reusing saved network %s (id=%s)", req.SSID, networkID)
+		savedPSK = readSavedPSK(r.Context(), req.Interface, req.SSID)
+		log.Printf("ConnectWiFi: reusing saved network %s (id=%s, psk_found=%v)", req.SSID, networkID, savedPSK != "")
 	} else {
 		// New network or password update: remove only the old entry for this SSID (not all),
 		// then create a fresh one with the provided credentials
@@ -901,12 +903,67 @@ func (h *HALHandler) ConnectWiFi(w http.ResponseWriter, r *http.Request) {
 	// Save config (best effort)
 	_, _ = execWpaCli(r.Context(), "-i", req.Interface, "save_config")
 
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"success":    true,
 		"ssid":       req.SSID,
 		"interface":  req.Interface,
 		"network_id": networkID,
-	})
+	}
+	if savedPSK != "" {
+		resp["password"] = savedPSK
+	}
+	jsonResponse(w, http.StatusOK, resp)
+}
+
+// readSavedPSK reads the saved PSK for a WiFi network from wpa_supplicant config.
+// When HAL reuses a saved wpa_supplicant network (password was empty), the API
+// needs the real password for netplan YAML generation. This reads the config file
+// via nsenter and extracts the psk value (plaintext passphrase or hex PSK).
+func readSavedPSK(ctx context.Context, iface, ssid string) string {
+	confPath := fmt.Sprintf("/etc/wpa_supplicant/wpa_supplicant-%s.conf", iface)
+	output, err := execWithTimeout(ctx, "nsenter", "-t", "1", "-m", "--", "cat", confPath)
+	if err != nil {
+		log.Printf("readSavedPSK: failed to read %s: %v", confPath, err)
+		return ""
+	}
+
+	lines := strings.Split(output, "\n")
+	inBlock := false
+	ssidMatches := false
+	psk := ""
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "network={" {
+			inBlock = true
+			ssidMatches = false
+			psk = ""
+			continue
+		}
+		if trimmed == "}" && inBlock {
+			if ssidMatches && psk != "" {
+				return psk
+			}
+			inBlock = false
+			continue
+		}
+		if !inBlock {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "ssid=") {
+			val := strings.TrimPrefix(trimmed, "ssid=")
+			val = strings.Trim(val, "\"")
+			if val == ssid {
+				ssidMatches = true
+			}
+		}
+		if strings.HasPrefix(trimmed, "psk=") {
+			val := strings.TrimPrefix(trimmed, "psk=")
+			psk = strings.Trim(val, "\"")
+		}
+	}
+
+	return ""
 }
 
 // DisconnectWiFi disconnects from current WiFi
