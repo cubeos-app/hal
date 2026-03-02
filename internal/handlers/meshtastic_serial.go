@@ -82,14 +82,20 @@ func (t *SerialTransport) Connect(ctx context.Context) error {
 		return err
 	}
 
-	// Configure serial port via stty (115200 baud, 8N1, raw mode)
+	// Configure serial port via stty (115200 baud, 8N1, raw mode).
+	// -hupcl prevents DTR from dropping on close, which would reboot
+	// CDC-ACM devices like the T-Echo. The Meshtastic Python CLI does
+	// the same via termios before opening the port.
+	// Note: VMIN/VTIME are set but ignored by Go's runtime — it switches
+	// the FD to O_NONBLOCK and uses epoll. We use SetReadDeadline instead.
 	if _, err := execWithTimeout(ctx, "stty", "-F", port,
 		fmt.Sprintf("%d", t.baud),
 		"raw", "-echo", "-echoe", "-echok",
 		"cs8", "-cstopb", "-parenb",
 		"-crtscts", // No hardware flow control
-		"min", "1", // Read at least 1 byte
-		"time", "1", // 100ms timeout
+		"-hupcl",   // Prevent DTR drop on close (avoids device reboot)
+		"min", "1",
+		"time", "1",
 	); err != nil {
 		return fmt.Errorf("stty config failed on %s: %w", port, err)
 	}

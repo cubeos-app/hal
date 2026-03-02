@@ -47,6 +47,9 @@ type IridiumDriver struct {
 	ringActive  bool
 	monitorDone chan struct{} // closed when monitor goroutine exits
 
+	// SBDIX rate limiting — Iridium spec requires min 10s between attempts
+	lastSBDIX time.Time
+
 	// Auto-reconnect
 	lastPort         string // last successfully connected port (for reconnect)
 	reconnecting     bool
@@ -73,7 +76,7 @@ type IridiumEvent struct {
 
 // SBDIXResult holds the parsed response from an AT+SBDIX session.
 type SBDIXResult struct {
-	MOStatus int `json:"mo_status"` // 0-2 = success, others = failure
+	MOStatus int `json:"mo_status"` // 0-4 = success, others = failure
 	MOMSN    int `json:"momsn"`     // MO message sequence number
 	MTStatus int `json:"mt_status"` // 0 = no MT, 1 = MT received, 2 = error
 	MTMSN    int `json:"mtmsn"`     // MT message sequence number
@@ -82,8 +85,10 @@ type SBDIXResult struct {
 }
 
 // MOSuccess returns true if the MO message was sent successfully.
+// Per Iridium ISU spec: 0=success, 1=success (MT too big), 2=success
+// (location rejected), 3=success (queued at ISU), 4=success (queued at gateway).
 func (r SBDIXResult) MOSuccess() bool {
-	return r.MOStatus >= 0 && r.MOStatus <= 2
+	return r.MOStatus >= 0 && r.MOStatus <= 4
 }
 
 // NewIridiumDriver creates a new Iridium driver instance.
@@ -162,6 +167,12 @@ func (d *IridiumDriver) Connect(ctx context.Context, port string) error {
 	if !strings.Contains(resp, "OK") {
 		d.closeLocked()
 		return fmt.Errorf("AT&K0 did not return OK: %s", resp)
+	}
+
+	// Ignore DTR line changes — Linux FTDI driver momentarily pulses
+	// DTR on port open, which with the default AT&D2 would reset the modem.
+	if resp, err := d.sendATLocked(ctx, "AT&D0", 2*time.Second); err != nil || !strings.Contains(resp, "OK") {
+		log.Printf("iridium: AT&D0 warning (non-fatal): err=%v resp=%q", err, resp)
 	}
 
 	// Basic connectivity check
@@ -713,6 +724,20 @@ func (d *IridiumDriver) sbdixLocked(ctx context.Context) (SBDIXResult, error) {
 		return SBDIXResult{}, fmt.Errorf("not connected")
 	}
 
+	// Iridium spec requires minimum 10 seconds between SBDIX attempts.
+	// Rapid calls can get the modem temporarily blocked by the gateway.
+	const minSBDIXInterval = 10 * time.Second
+	if elapsed := time.Since(d.lastSBDIX); elapsed < minSBDIXInterval {
+		wait := minSBDIXInterval - elapsed
+		log.Printf("iridium: SBDIX rate limit — waiting %v", wait.Round(time.Millisecond))
+		select {
+		case <-ctx.Done():
+			return SBDIXResult{}, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+
+	d.lastSBDIX = time.Now()
 	resp, err := d.sendATLocked(ctx, "AT+SBDIX", d.sbdixTimeout)
 	if err != nil {
 		return SBDIXResult{}, fmt.Errorf("SBDIX failed: %w", err)

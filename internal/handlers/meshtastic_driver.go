@@ -395,10 +395,29 @@ func (d *MeshtasticDriver) readerLoop() {
 		cancel()
 	}()
 
+	// Heartbeat timer — Meshtastic firmware drops the serial connection
+	// after 15 minutes of inactivity. Send heartbeat every 300 seconds
+	// (same interval as the Python CLI) to keep it alive.
+	heartbeatTicker := time.NewTicker(300 * time.Second)
+	defer heartbeatTicker.Stop()
+	var heartbeatNonce uint32
+
 	for {
 		select {
 		case <-d.stopReader:
 			return
+		case <-heartbeatTicker.C:
+			heartbeatNonce++
+			hb := buildHeartbeat(heartbeatNonce)
+			d.mu.RLock()
+			transport := d.transport
+			d.mu.RUnlock()
+			if transport != nil {
+				if err := transport.SendToRadio(hb); err != nil {
+					log.Printf("meshtastic: heartbeat send failed: %v", err)
+				}
+			}
+			continue
 		default:
 		}
 
@@ -883,6 +902,25 @@ func buildWantConfigID(configID uint32) []byte {
 	buf := make([]byte, 0, 8)
 	buf = append(buf, 0x18) // field 3, varint
 	buf = appendVarint(buf, uint64(configID))
+	return buf
+}
+
+// buildHeartbeat builds a ToRadio protobuf with heartbeat set.
+// ToRadio field 7 (Heartbeat) = heartbeat; Heartbeat field 1 = nonce (uint32 varint)
+// The Meshtastic firmware drops serial connections after 15 minutes of inactivity.
+// Send this every 300 seconds to keep the connection alive.
+func buildHeartbeat(nonce uint32) []byte {
+	// Build inner Heartbeat message: field 1 (varint) = nonce
+	inner := make([]byte, 0, 8)
+	inner = append(inner, 0x08) // field 1, varint
+	inner = appendVarint(inner, uint64(nonce))
+
+	// Wrap in ToRadio: field 7, length-delimited
+	// Key = (7 << 3) | 2 = 58 = 0x3A
+	buf := make([]byte, 0, len(inner)+4)
+	buf = append(buf, 0x3A) // field 7, length-delimited
+	buf = appendVarint(buf, uint64(len(inner)))
+	buf = append(buf, inner...)
 	return buf
 }
 
