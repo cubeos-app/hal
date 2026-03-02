@@ -433,9 +433,26 @@ var SignalDescriptions = map[int]string{
 	5: "Excellent (~-102 dBm)",
 }
 
-// GetSignal queries the modem signal strength.
+// GetSignal queries the modem signal strength (AT+CSQ).
+// This may block up to 30s if the modem is acquiring the system.
 func (d *IridiumDriver) GetSignal(ctx context.Context) (int, string, error) {
-	resp, err := d.SendAT(ctx, "AT+CSQ", 5*time.Second)
+	resp, err := d.SendAT(ctx, "AT+CSQ", 30*time.Second)
+	if err != nil {
+		return 0, "No signal", err
+	}
+
+	strength := parseCSQ(resp)
+	desc, ok := SignalDescriptions[strength]
+	if !ok {
+		desc = "Unknown"
+	}
+	return strength, desc, nil
+}
+
+// GetSignalFast returns the last known signal strength (AT+CSQF).
+// Returns immediately with a cached value (may be up to 15s old).
+func (d *IridiumDriver) GetSignalFast(ctx context.Context) (int, string, error) {
+	resp, err := d.SendAT(ctx, "AT+CSQF", 5*time.Second)
 	if err != nil {
 		return 0, "No signal", err
 	}
@@ -1155,13 +1172,19 @@ func parseModelResponse(resp string) string {
 	return ""
 }
 
-// parseCSQ extracts signal strength (0-5) from an AT+CSQ response.
+// parseCSQ extracts signal strength (0-5) from an AT+CSQ or AT+CSQF response.
 func parseCSQ(resp string) int {
-	idx := strings.Index(resp, "+CSQ:")
+	// Try +CSQF: first (fast variant), then +CSQ:
+	idx := strings.Index(resp, "+CSQF:")
+	offset := 6
+	if idx == -1 {
+		idx = strings.Index(resp, "+CSQ:")
+		offset = 5
+	}
 	if idx == -1 {
 		return 0
 	}
-	remainder := strings.TrimSpace(resp[idx+5:])
+	remainder := strings.TrimSpace(resp[idx+offset:])
 	sigStr := strings.Split(remainder, "\n")[0]
 	sigStr = strings.TrimSpace(sigStr)
 	sig, err := strconv.Atoi(sigStr)

@@ -127,8 +127,8 @@ func (h *HALHandler) GetIridiumStatus(w http.ResponseWriter, r *http.Request) {
 		LastCheck: time.Now().UTC().Format(time.RFC3339),
 	}
 
-	// Get signal
-	sig, _, err := h.iridium.GetSignal(ctx)
+	// Get signal (fast/cached — doesn't block during system acquisition)
+	sig, _, err := h.iridium.GetSignalFast(ctx)
 	if err != nil {
 		log.Printf("iridium: signal query failed: %v", err)
 	} else {
