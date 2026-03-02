@@ -98,26 +98,46 @@ if [ "$WIFI_WAS_UP" = "true" ]; then
       netplan apply 2>/dev/null || true
       sleep 10
     done
-    # Restore source-based routing for dual-interface same-subnet
+    # Restore dual-interface same-subnet routing (three-layer fix):
+    # Layer 1: rp_filter=2 (loose) — strict drops wlan0 SYNs when eth0 has lower metric
+    # Layer 2: source-based + Docker routes in table 100
+    # Layer 3: connmark routing — DNAT reply packets route back via wlan0
+    sysctl -qw net.ipv4.conf.wlan0.rp_filter=2 2>/dev/null || true
     sysctl -qw net.ipv4.conf.all.arp_filter=1 2>/dev/null || true
     sysctl -qw net.ipv4.conf.all.arp_announce=2 2>/dev/null || true
     WIFI_NOW=$(ip -4 addr show wlan0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
     if [ -n "$WIFI_NOW" ]; then
       WLAN_GW=$(ip route show dev wlan0 2>/dev/null | grep default | awk '{print $3}')
       if [ -n "$WLAN_GW" ]; then
+        # Source-based policy rule
         ip rule add from "$WIFI_NOW" table 100 2>/dev/null || true
         ip route replace default via "$WLAN_GW" dev wlan0 table 100 2>/dev/null || true
+        # Subnet route
+        WLAN_NET=$(ip -4 addr show wlan0 2>/dev/null | grep -oP 'inet \K[0-9./]+' || true)
+        if [ -n "$WLAN_NET" ]; then
+          SUBNET=$(python3 -c "import ipaddress; print(ipaddress.ip_interface('$WLAN_NET').network)" 2>/dev/null || true)
+          [ -n "$SUBNET" ] && ip route replace "$SUBNET" dev wlan0 scope link table 100 2>/dev/null || true
+        fi
       fi
-      # Docker networks must be routable from table 100 — otherwise
-      # DNATed traffic from the wlan0 IP gets sent to the default
-      # gateway via wlan0 instead of to docker_gwbridge, breaking
-      # all Docker services when accessed via the WiFi IP.
+      # Docker network routes in table 100
       ip route show | awk '/dev docker_gwbridge .* scope link/{print $1}' | while read -r NET; do
         ip route replace "$NET" dev docker_gwbridge table 100 2>/dev/null || true
       done
       ip route show | awk '/dev docker0 .* scope link/{print $1}' | while read -r NET; do
         ip route replace "$NET" dev docker0 table 100 2>/dev/null || true
       done
+      # Connmark-based routing for DNAT reply packets
+      ip rule show | grep -q 'fwmark 0x64 lookup 100' || \
+        ip rule add fwmark 100 table 100 priority 32764 2>/dev/null || true
+      if ! iptables -t mangle -C PREROUTING -j CONNMARK --restore-mark 2>/dev/null; then
+        iptables -t mangle -A PREROUTING -j CONNMARK --restore-mark 2>/dev/null || true
+      fi
+      if ! iptables -t mangle -C PREROUTING -i wlan0 -m conntrack --ctstate NEW -j MARK --set-mark 100 2>/dev/null; then
+        iptables -t mangle -A PREROUTING -i wlan0 -m conntrack --ctstate NEW -j MARK --set-mark 100 2>/dev/null || true
+      fi
+      if ! iptables -t mangle -C PREROUTING -m mark --mark 100 -j CONNMARK --save-mark 2>/dev/null; then
+        iptables -t mangle -A PREROUTING -m mark --mark 100 -j CONNMARK --save-mark 2>/dev/null || true
+      fi
     fi
     echo "WiFi watchdog done: wlan0=${WIFI_NOW:-FAILED}"
   ) </dev/null >/tmp/hal-wifi-recovery.log 2>&1 &
