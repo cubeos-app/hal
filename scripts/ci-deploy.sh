@@ -59,6 +59,45 @@ if ip link show wlan0 2>/dev/null | grep -q "state UP"; then
   echo "WiFi client active: wlan0=${WIFI_IP:-unknown}"
 fi
 
+# --- Spawn WiFi recovery watchdog BEFORE recreate ---
+# This runs as a detached background process so it survives if SSH dies
+# (HAL container recreate can disrupt WiFi, killing the SSH session)
+if [ "$WIFI_WAS_UP" = "true" ]; then
+  (
+    sleep 15  # wait for container recreate to happen
+    # Always run netplan apply — container recreate disconnects wpa_supplicant
+    # even if the interface still shows UP with a stale IP
+    echo "Running netplan apply to reconnect WiFi..."
+    netplan apply 2>/dev/null || true
+    sleep 10
+    for attempt in 1 2 3; do
+      WIFI_LINK=$(iw dev wlan0 link 2>/dev/null | head -1)
+      WIFI_NOW=$(ip -4 addr show wlan0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
+      if echo "$WIFI_LINK" | grep -q "Connected"; then
+        echo "WiFi connected (attempt $attempt): ${WIFI_NOW:-no IP yet}"
+        break
+      fi
+      echo "WiFi not connected (attempt $attempt) — retrying..."
+      netplan apply 2>/dev/null || true
+      sleep 10
+    done
+    # Restore source-based routing for dual-interface same-subnet
+    sysctl -qw net.ipv4.conf.all.arp_filter=1 2>/dev/null || true
+    sysctl -qw net.ipv4.conf.all.arp_announce=2 2>/dev/null || true
+    WIFI_NOW=$(ip -4 addr show wlan0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
+    if [ -n "$WIFI_NOW" ]; then
+      WLAN_GW=$(ip route show dev wlan0 2>/dev/null | grep default | awk '{print $3}')
+      if [ -n "$WLAN_GW" ]; then
+        ip rule add from "$WIFI_NOW" table 100 2>/dev/null || true
+        ip route replace default via "$WLAN_GW" dev wlan0 table 100 2>/dev/null || true
+      fi
+    fi
+    echo "WiFi watchdog done: wlan0=${WIFI_NOW:-FAILED}"
+  ) </dev/null >/tmp/hal-wifi-recovery.log 2>&1 &
+  disown
+  echo "WiFi recovery watchdog spawned (PID: $!)"
+fi
+
 # --- Deploy HAL (atomic recreate — avoids full teardown) ---
 echo "Deploying HAL (force-recreate)..."
 DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up -d --force-recreate --pull never
@@ -73,32 +112,6 @@ for i in $(seq 1 10); do
   [ "$i" -eq 10 ] && echo "HAL may still be starting..."
   sleep 3
 done
-
-# --- Restore WiFi if it was disrupted ---
-if [ "$WIFI_WAS_UP" = "true" ]; then
-  sleep 2
-  WIFI_NOW=$(ip -4 addr show wlan0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
-  if [ -z "$WIFI_NOW" ] || [ "$WIFI_NOW" != "$WIFI_IP" ]; then
-    echo "WARN: WiFi disrupted (was ${WIFI_IP}, now ${WIFI_NOW:-down}) — recovering..."
-    netplan apply 2>/dev/null || true
-    sleep 5
-    WIFI_NOW=$(ip -4 addr show wlan0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
-    echo "WiFi recovered: wlan0=${WIFI_NOW:-FAILED}"
-  else
-    echo "WiFi intact: wlan0=${WIFI_NOW}"
-  fi
-
-  # Ensure source-based routing for dual-interface same-subnet
-  sysctl -qw net.ipv4.conf.all.arp_filter=1 2>/dev/null || true
-  sysctl -qw net.ipv4.conf.all.arp_announce=2 2>/dev/null || true
-  if [ -n "$WIFI_NOW" ]; then
-    WLAN_GW=$(ip route show dev wlan0 2>/dev/null | grep default | awk '{print $3}')
-    if [ -n "$WLAN_GW" ]; then
-      ip rule add from "$WIFI_NOW" table 100 2>/dev/null || true
-      ip route replace default via "$WLAN_GW" dev wlan0 table 100 2>/dev/null || true
-    fi
-  fi
-fi
 
 echo "Swagger UI: http://cubeos.cube:6005/hal/docs"
 echo "Deploy complete"

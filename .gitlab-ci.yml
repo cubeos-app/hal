@@ -135,10 +135,35 @@ deploy:
       echo "Deploy target: ${PI_DEPLOY_HOST}"
   script:
     - scp scripts/ci-deploy.sh ${PI_DEPLOY_HOST}:/tmp/ci-deploy-hal.sh
+    # Run deploy detached via nohup — HAL container recreate can disrupt WiFi
+    # which kills the SSH session. The deploy script has a WiFi recovery watchdog.
     - |
-      ssh -o ServerAliveInterval=15 ${PI_DEPLOY_HOST} \
-        "GHCR_TOKEN='${GHCR_TOKEN}' GHCR_USER='${GHCR_USER}' bash /tmp/ci-deploy-hal.sh"
-    - ssh ${PI_DEPLOY_HOST} "rm -f /tmp/ci-deploy-hal.sh"
+      ssh ${PI_DEPLOY_HOST} \
+        "GHCR_TOKEN='${GHCR_TOKEN}' GHCR_USER='${GHCR_USER}' \
+         nohup bash /tmp/ci-deploy-hal.sh > /tmp/hal-deploy.log 2>&1 & echo \$!"
+    # Wait for deploy + WiFi recovery (container recreate + health check + watchdog)
+    - sleep 70
+    # Reconnect to verify deploy — try both interfaces (WiFi may have changed)
+    - |
+      VERIFY_CMD="echo '--- Deploy log ---'; cat /tmp/hal-deploy.log 2>/dev/null; \
+        echo '--- WiFi recovery log ---'; cat /tmp/hal-wifi-recovery.log 2>/dev/null; \
+        echo '--- Health check ---'; curl -sf http://127.0.0.1:6005/health && echo 'HAL OK'"
+      CLEANUP_CMD="rm -f /tmp/ci-deploy-hal.sh /tmp/hal-deploy.log /tmp/hal-wifi-recovery.log"
+      for i in 1 2 3 4 5; do
+        for ADDR in ${PI_DEPLOY_ADDR} ${PI_DEPLOY_ADDR_ALT}; do
+          [ -z "$ADDR" ] && continue
+          ssh-keyscan -H "$ADDR" >> ~/.ssh/known_hosts 2>/dev/null || true
+          if ssh -o ConnectTimeout=10 -o BatchMode=yes "cubeos@${ADDR}" "$VERIFY_CMD" 2>/dev/null; then
+            echo "HAL deploy verified via ${ADDR}"
+            ssh -o ConnectTimeout=5 "cubeos@${ADDR}" "$CLEANUP_CMD" 2>/dev/null || true
+            exit 0
+          fi
+        done
+        echo "Attempt $i: Pi not yet reachable, waiting 15s..."
+        sleep 15
+      done
+      echo "ERROR: Pi not reachable after HAL deploy"
+      exit 1
   after_script:
     - kill $SSH_AGENT_PID 2>/dev/null || true
   rules:
