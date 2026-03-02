@@ -75,6 +75,16 @@ type IridiumClearRequest struct {
 	Buffer string `json:"buffer" example:"both" enums:"mo,mt,both"`
 }
 
+type IridiumATRequest struct {
+	Command     string `json:"command" example:"AT+CSQ"`
+	TimeoutSecs int    `json:"timeout_secs,omitempty" example:"30"`
+}
+
+type IridiumATResponse struct {
+	Command  string `json:"command"`
+	Response string `json:"response"`
+}
+
 // ============================================================================
 // Handlers
 // ============================================================================
@@ -492,6 +502,10 @@ func (h *HALHandler) StreamIridiumEvents(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Disable the server's WriteTimeout for this long-lived SSE stream.
+	rc := http.NewResponseController(w)
+	rc.SetWriteDeadline(time.Time{})
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -510,9 +524,17 @@ func (h *HALHandler) StreamIridiumEvents(w http.ResponseWriter, r *http.Request)
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", initialEvent.Type, string(data))
 	flusher.Flush()
 
+	keepalive := time.NewTicker(30 * time.Second)
+	defer keepalive.Stop()
+
 	ctx := r.Context()
 	for {
 		select {
+		case <-keepalive.C:
+			if _, err := fmt.Fprint(w, ":keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case event, ok := <-events:
 			if !ok {
 				return
@@ -574,4 +596,51 @@ func (h *HALHandler) DisconnectIridium(w http.ResponseWriter, r *http.Request) {
 // GetIridiumMessages is a backward-compatibility alias for ReceiveIridiumMessage.
 func (h *HALHandler) GetIridiumMessages(w http.ResponseWriter, r *http.Request) {
 	h.ReceiveIridiumMessage(w, r)
+}
+
+// SendIridiumATCommand sends a raw AT command to the modem for diagnostics.
+// @Summary Send raw AT command
+// @Description Sends a raw AT command and returns the modem response. For diagnostics only.
+// @Tags Iridium
+// @Accept json
+// @Produce json
+// @Param request body IridiumATRequest true "AT command"
+// @Success 200 {object} IridiumATResponse
+// @Failure 400 {object} ErrorResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /iridium/at [post]
+func (h *HALHandler) SendIridiumATCommand(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	r = limitBody(r, 1<<20)
+
+	var req IridiumATRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Command == "" {
+		errorResponse(w, http.StatusBadRequest, "command field is required")
+		return
+	}
+
+	if !h.iridium.IsConnected() {
+		errorResponse(w, http.StatusInternalServerError, "modem not connected")
+		return
+	}
+
+	timeout := 30 * time.Second
+	if req.TimeoutSecs > 0 {
+		timeout = time.Duration(req.TimeoutSecs) * time.Second
+	}
+
+	resp, err := h.iridium.SendAT(ctx, req.Command, timeout)
+	if err != nil {
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("AT command failed: %v", err))
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, IridiumATResponse{
+		Command:  req.Command,
+		Response: resp,
+	})
 }

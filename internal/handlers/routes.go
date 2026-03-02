@@ -259,6 +259,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/receive", h.ReceiveIridiumMessage)
 		r.Get("/messages", h.GetIridiumMessages) // backward compat alias
 		r.Post("/clear", h.ClearIridiumBuffers)
+		r.Post("/at", h.SendIridiumATCommand)
 		r.Get("/events", h.StreamIridiumEvents)
 	})
 
