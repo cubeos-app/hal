@@ -198,6 +198,13 @@ func (d *IridiumDriver) Connect(ctx context.Context, port string) error {
 
 	log.Printf("iridium: connected to %s (IMEI: %s, Model: %s)", port, d.imei, d.model)
 	d.lastPort = port
+
+	// Enable ring alerts so the monitor goroutine sees SBDRING for MT messages.
+	// Do this every connect — ATZ or power-cycle can reset SBDMTA to 0.
+	if resp, err := d.sendATLocked(ctx, "AT+SBDMTA=1", 3*time.Second); err != nil || !strings.Contains(resp, "OK") {
+		log.Printf("iridium: AT+SBDMTA=1 warning (non-fatal): err=%v resp=%q", err, resp)
+	}
+
 	d.emitEvent(IridiumEvent{
 		Type:    "connected",
 		Message: fmt.Sprintf("Connected to %s (IMEI: %s)", port, d.imei),
@@ -375,58 +382,56 @@ func (d *IridiumDriver) sendATLocked(ctx context.Context, command string, timeou
 
 // readResponseLocked reads the serial port until "OK" or "ERROR" is found,
 // or until the timeout expires. Caller must hold d.mu.
+//
+// Uses SetDeadline-based polling (no goroutine) so the mutex is held throughout.
+// This prevents monitorLoop from racing on d.file and stealing bytes from
+// AT responses, which would cause parsers (e.g. parseCSQ) to silently return 0.
 func (d *IridiumDriver) readResponseLocked(ctx context.Context, timeout time.Duration) (string, error) {
 	if d.file == nil {
 		return "", fmt.Errorf("not connected")
 	}
 
 	deadline := time.Now().Add(timeout)
+	var resp strings.Builder
+	buf := make([]byte, 256)
 
-	type readResult struct {
-		data string
-		err  error
-	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("read timeout")
+		}
 
-	resultCh := make(chan readResult, 1)
+		// Use short read slices so ctx cancellation is checked regularly.
+		// SetDeadline applies to the fd globally — monitorLoop is blocked on
+		// d.mu so it cannot race here, but the deadline also prevents hanging
+		// if the modem goes silent mid-response.
+		sliceEnd := time.Now().Add(50 * time.Millisecond)
+		if sliceEnd.After(deadline) {
+			sliceEnd = deadline
+		}
+		d.file.SetDeadline(sliceEnd)
+		n, err := d.file.Read(buf)
+		d.file.SetDeadline(time.Time{}) // clear immediately after each read
 
-	go func() {
-		var resp strings.Builder
-		tmpBuf := make([]byte, 256)
-		for {
-			n, err := d.file.Read(tmpBuf)
-			if n > 0 {
-				chunk := string(tmpBuf[:n])
-				resp.WriteString(chunk)
-				full := resp.String()
+		if n > 0 {
+			resp.WriteString(string(buf[:n]))
+			full := resp.String()
 
-				// Check for terminal responses
-				if strings.Contains(full, "\r\nOK\r\n") ||
-					strings.HasSuffix(strings.TrimSpace(full), "OK") ||
-					strings.Contains(full, "\r\nERROR\r\n") ||
-					strings.HasSuffix(strings.TrimSpace(full), "ERROR") ||
-					strings.Contains(full, "READY") {
-					resultCh <- readResult{data: full}
-					return
-				}
-			}
-			if err != nil {
-				resultCh <- readResult{data: resp.String(), err: err}
-				return
-			}
-			if time.Now().After(deadline) {
-				resultCh <- readResult{data: resp.String(), err: fmt.Errorf("read timeout")}
-				return
+			// Check for terminal responses
+			if strings.Contains(full, "\r\nOK\r\n") ||
+				strings.HasSuffix(strings.TrimSpace(full), "OK") ||
+				strings.Contains(full, "\r\nERROR\r\n") ||
+				strings.HasSuffix(strings.TrimSpace(full), "ERROR") ||
+				strings.Contains(full, "READY") {
+				return full, nil
 			}
 		}
-	}()
 
-	select {
-	case res := <-resultCh:
-		return res.data, res.err
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case <-time.After(time.Until(deadline) + 500*time.Millisecond):
-		return "", fmt.Errorf("read timeout")
+		if err != nil && !isTimeoutError(err) {
+			return resp.String(), err
+		}
 	}
 }
 
