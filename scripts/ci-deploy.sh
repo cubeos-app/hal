@@ -50,12 +50,18 @@ docker push "${LOCAL_REG_IMAGE}" 2>/dev/null && \
   echo "  Pushed to local registry: ${LOCAL_REG_IMAGE}" || \
   echo "  WARN: Local registry push failed (non-fatal)"
 
-echo "Stopping existing HAL..."
-docker rm -f cubeos-hal 2>/dev/null || true
-docker compose down 2>/dev/null || true
+# --- Save WiFi state before deploy ---
+WIFI_WAS_UP=false
+WIFI_IP=""
+if ip link show wlan0 2>/dev/null | grep -q "state UP"; then
+  WIFI_WAS_UP=true
+  WIFI_IP=$(ip -4 addr show wlan0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
+  echo "WiFi client active: wlan0=${WIFI_IP:-unknown}"
+fi
 
-echo "Starting HAL..."
-DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up -d --pull never
+# --- Deploy HAL (atomic recreate — avoids full teardown) ---
+echo "Deploying HAL (force-recreate)..."
+DOCKER_DEFAULT_PLATFORM=linux/arm64 docker compose up -d --force-recreate --pull never
 
 # --- Health check ---
 sleep 5
@@ -67,6 +73,32 @@ for i in $(seq 1 10); do
   [ "$i" -eq 10 ] && echo "HAL may still be starting..."
   sleep 3
 done
+
+# --- Restore WiFi if it was disrupted ---
+if [ "$WIFI_WAS_UP" = "true" ]; then
+  sleep 2
+  WIFI_NOW=$(ip -4 addr show wlan0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
+  if [ -z "$WIFI_NOW" ] || [ "$WIFI_NOW" != "$WIFI_IP" ]; then
+    echo "WARN: WiFi disrupted (was ${WIFI_IP}, now ${WIFI_NOW:-down}) — recovering..."
+    netplan apply 2>/dev/null || true
+    sleep 5
+    WIFI_NOW=$(ip -4 addr show wlan0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
+    echo "WiFi recovered: wlan0=${WIFI_NOW:-FAILED}"
+  else
+    echo "WiFi intact: wlan0=${WIFI_NOW}"
+  fi
+
+  # Ensure source-based routing for dual-interface same-subnet
+  sysctl -qw net.ipv4.conf.all.arp_filter=1 2>/dev/null || true
+  sysctl -qw net.ipv4.conf.all.arp_announce=2 2>/dev/null || true
+  if [ -n "$WIFI_NOW" ]; then
+    WLAN_GW=$(ip route show dev wlan0 2>/dev/null | grep default | awk '{print $3}')
+    if [ -n "$WLAN_GW" ]; then
+      ip rule add from "$WIFI_NOW" table 100 2>/dev/null || true
+      ip route replace default via "$WLAN_GW" dev wlan0 table 100 2>/dev/null || true
+    fi
+  fi
+fi
 
 echo "Swagger UI: http://cubeos.cube:6005/hal/docs"
 echo "Deploy complete"
