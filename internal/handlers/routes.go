@@ -252,6 +252,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Get("/devices", h.GetIridiumDevices)
 		r.Get("/status", h.GetIridiumStatus)
 		r.Get("/signal", h.GetIridiumSignal)
+		r.Get("/signal/fast", h.GetIridiumSignalFast)
 		r.Post("/connect", h.ConnectIridium)
 		r.Post("/disconnect", h.DisconnectIridium)
 		r.Post("/send", h.SendIridiumMessage)

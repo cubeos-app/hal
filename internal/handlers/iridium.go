@@ -194,6 +194,40 @@ func (h *HALHandler) GetIridiumSignal(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetIridiumSignalFast returns cached signal strength (AT+CSQF, ~100ms).
+// @Summary Get Iridium signal strength (cached)
+// @Description Returns the last cached signal quality (0-5) from the modem's internal buffer via AT+CSQF. Non-blocking (~100ms). Safe to call frequently (every 10s). Use /signal for a fresh blocking measurement.
+// @Tags Iridium
+// @Produce json
+// @Success 200 {object} IridiumSignalResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /iridium/signal/fast [get]
+func (h *HALHandler) GetIridiumSignalFast(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	if !h.iridium.IsConnected() {
+		jsonResponse(w, http.StatusOK, IridiumSignalResponse{
+			Strength:    0,
+			Description: "No signal (modem not connected)",
+		})
+		return
+	}
+
+	strength, desc, err := h.iridium.GetSignalFast(ctx)
+	if err != nil {
+		jsonResponse(w, http.StatusOK, IridiumSignalResponse{
+			Strength:    0,
+			Description: "No signal",
+		})
+		return
+	}
+
+	jsonResponse(w, http.StatusOK, IridiumSignalResponse{
+		Strength:    strength,
+		Description: desc,
+	})
+}
+
 // SendIridiumMessage sends an SBD message (text or binary).
 // @Summary Send Iridium SBD message
 // @Description Writes message to MO buffer and initiates SBDIX session. Blocking (10-60s).
