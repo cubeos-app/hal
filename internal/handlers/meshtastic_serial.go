@@ -30,6 +30,11 @@ type SerialTransport struct {
 	baud      int
 	file      *os.File
 	connected bool
+
+	// Persistent read buffer — survives between RecvFromRadio calls so that
+	// leftover bytes from multi-frame OS reads are not silently discarded.
+	// Only accessed by readerLoop (single goroutine), no lock needed.
+	accum []byte
 }
 
 const (
@@ -97,6 +102,7 @@ func (t *SerialTransport) Connect(ctx context.Context) error {
 	t.file = file
 	t.port = port
 	t.connected = true
+	t.accum = nil // Clear any stale read buffer from previous connection
 
 	// Send wake sequence: 32 bytes of START2 (0xC3)
 	// This forces the Meshtastic device to resync its serial parser
@@ -125,6 +131,7 @@ func (t *SerialTransport) Disconnect() error {
 
 func (t *SerialTransport) closeLocked() error {
 	t.connected = false
+	t.accum = nil // Clear read buffer
 	if t.file != nil {
 		err := t.file.Close()
 		t.file = nil
@@ -165,11 +172,23 @@ func (t *SerialTransport) SendToRadio(data []byte) error {
 // RecvFromRadio blocks until a complete FromRadio protobuf is received.
 // It scans for the 0x94 0xC3 start marker, reads the 2-byte length,
 // then reads the full protobuf payload.
+//
+// The accumulation buffer (t.accum) persists across calls so that leftover
+// bytes from multi-frame OS reads are not lost. During config download the
+// radio sends ~25 packets in a burst — a single file.Read() often returns
+// multiple frames. Without persistence the trailing frames were silently
+// discarded, causing config_complete_id to never arrive and mesh packets
+// to be lost after connect.
 func (t *SerialTransport) RecvFromRadio(ctx context.Context) ([]byte, error) {
 	buf := make([]byte, meshReadBufSize)
-	var accum []byte
 
 	for {
+		// Check for a complete frame already in the persistent buffer
+		// (leftover from a previous multi-frame read)
+		if payload := t.extractFrame(); payload != nil {
+			return payload, nil
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -193,61 +212,68 @@ func (t *SerialTransport) RecvFromRadio(ctx context.Context) ([]byte, error) {
 			continue
 		}
 
-		accum = append(accum, buf[:n]...)
+		t.accum = append(t.accum, buf[:n]...)
 
-		// Scan for start marker
-		for {
-			startIdx := findStartMarker(accum)
-			if startIdx < 0 {
-				// No start marker found — keep last byte in case it's START1
-				if len(accum) > 0 {
-					accum = accum[len(accum)-1:]
-				}
-				break
-			}
-
-			// Discard any bytes before the start marker (debug output)
-			if startIdx > 0 {
-				accum = accum[startIdx:]
-			}
-
-			// Need at least 4 bytes for header
-			if len(accum) < 4 {
-				break // Wait for more data
-			}
-
-			// Read length (big-endian uint16)
-			payloadLen := int(accum[2])<<8 | int(accum[3])
-
-			// Sanity check
-			if payloadLen > meshMaxPayload {
-				// Corrupted — skip this start marker and look for next
-				log.Printf("meshtastic: corrupted frame (len=%d > max=%d), re-scanning", payloadLen, meshMaxPayload)
-				accum = accum[2:] // Skip past START1+START2, re-scan
-				continue
-			}
-
-			if payloadLen == 0 {
-				// Empty packet — skip
-				accum = accum[4:]
-				continue
-			}
-
-			// Check if we have the full payload
-			totalLen := 4 + payloadLen
-			if len(accum) < totalLen {
-				break // Wait for more data
-			}
-
-			// Extract payload
-			payload := make([]byte, payloadLen)
-			copy(payload, accum[4:totalLen])
-
-			// Advance past this frame
-			accum = accum[totalLen:]
-
+		if payload := t.extractFrame(); payload != nil {
 			return payload, nil
 		}
+	}
+}
+
+// extractFrame scans the persistent accum buffer for a complete framed
+// protobuf message. Returns the payload if found, nil if more data needed.
+func (t *SerialTransport) extractFrame() []byte {
+	for {
+		startIdx := findStartMarker(t.accum)
+		if startIdx < 0 {
+			// No start marker found — keep last byte in case it's START1
+			if len(t.accum) > 1 {
+				t.accum = t.accum[len(t.accum)-1:]
+			}
+			return nil
+		}
+
+		// Discard any bytes before the start marker
+		if startIdx > 0 {
+			t.accum = t.accum[startIdx:]
+		}
+
+		// Need at least 4 bytes for header
+		if len(t.accum) < 4 {
+			return nil // Wait for more data
+		}
+
+		// Read length (big-endian uint16)
+		payloadLen := int(t.accum[2])<<8 | int(t.accum[3])
+
+		// Sanity check
+		if payloadLen > meshMaxPayload {
+			// Corrupted — skip this start marker and look for next
+			log.Printf("meshtastic: corrupted frame (len=%d > max=%d), re-scanning", payloadLen, meshMaxPayload)
+			t.accum = t.accum[2:] // Skip past START1+START2, re-scan
+			continue
+		}
+
+		if payloadLen == 0 {
+			// Empty packet — skip
+			t.accum = t.accum[4:]
+			continue
+		}
+
+		// Check if we have the full payload
+		totalLen := 4 + payloadLen
+		if len(t.accum) < totalLen {
+			return nil // Wait for more data
+		}
+
+		// Extract payload
+		payload := make([]byte, payloadLen)
+		copy(payload, t.accum[4:totalLen])
+
+		// Advance past this frame (remaining data stays in t.accum)
+		t.accum = t.accum[totalLen:]
+
+		return payload
 	}
 }
 
