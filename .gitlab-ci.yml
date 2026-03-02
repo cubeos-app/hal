@@ -139,7 +139,7 @@ deploy:
     # which kills the SSH session. The deploy script has a WiFi recovery watchdog.
     - |
       ssh ${PI_DEPLOY_HOST} \
-        "GHCR_TOKEN='${GHCR_TOKEN}' GHCR_USER='${GHCR_USER}' \
+        "GHCR_TOKEN='${GHCR_TOKEN}' GHCR_USER='${GHCR_USER}' CI_COMMIT_SHORT_SHA='${CI_COMMIT_SHORT_SHA}' \
          nohup bash /tmp/ci-deploy-hal.sh > /tmp/hal-deploy.log 2>&1 & echo \$!"
     # Wait for deploy + WiFi recovery (container recreate + health check + watchdog)
     - sleep 70

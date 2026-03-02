@@ -35,20 +35,37 @@ echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
 cd /cubeos/coreapps/cubeos-hal/appconfig
 
 # --- Pull from GHCR ---
-echo "Pulling latest HAL image from GHCR..."
 GHCR_IMAGE="ghcr.io/cubeos-app/hal"
-timeout 120 docker pull "${GHCR_IMAGE}:latest" 2>&1 || {
+PULL_TAG="${CI_COMMIT_SHORT_SHA:-latest}"
+echo "Pulling HAL image from GHCR (${PULL_TAG})..."
+timeout 120 docker pull "${GHCR_IMAGE}:${PULL_TAG}" 2>&1 || {
   echo "Pull failed, using cached..."
 }
 
 # --- Retag for local registry ---
 LOCAL_REG_IMAGE="localhost:5000/cubeos-app/hal:latest"
-docker tag "${GHCR_IMAGE}:latest" "${LOCAL_REG_IMAGE}" 2>/dev/null || true
+docker tag "${GHCR_IMAGE}:${PULL_TAG}" "${GHCR_IMAGE}:latest" 2>/dev/null || true
+docker tag "${GHCR_IMAGE}:${PULL_TAG}" "${LOCAL_REG_IMAGE}" 2>/dev/null || true
 
 # --- Push to local registry (keeps registry in sync) ---
 docker push "${LOCAL_REG_IMAGE}" 2>/dev/null && \
   echo "  Pushed to local registry: ${LOCAL_REG_IMAGE}" || \
   echo "  WARN: Local registry push failed (non-fatal)"
+
+# --- Check if running container already has this image ---
+RUNNING_CID=$(docker ps --filter "name=cubeos-hal" --format '{{.ID}}' | head -1 || true)
+if [ -n "${RUNNING_CID}" ]; then
+  RUNNING_SHA=$(docker inspect "${RUNNING_CID}" --format '{{.Image}}' 2>/dev/null || true)
+  TARGET_SHA=$(docker image inspect "${LOCAL_REG_IMAGE}" --format '{{.Id}}' 2>/dev/null || true)
+  if [ -n "${RUNNING_SHA}" ] && [ -n "${TARGET_SHA}" ] && [ "${RUNNING_SHA}" = "${TARGET_SHA}" ]; then
+    echo "Already running target image (digest match) — skipping recreate"
+    echo "Swagger UI: http://cubeos.cube:6005/hal/docs"
+    echo "Deploy complete (no change)"
+    exit 0
+  else
+    echo "Image changed: running=${RUNNING_SHA:7:12} target=${TARGET_SHA:7:12}"
+  fi
+fi
 
 # --- Save WiFi state before deploy ---
 WIFI_WAS_UP=false
