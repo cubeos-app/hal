@@ -108,6 +108,16 @@ if [ "$WIFI_WAS_UP" = "true" ]; then
         ip rule add from "$WIFI_NOW" table 100 2>/dev/null || true
         ip route replace default via "$WLAN_GW" dev wlan0 table 100 2>/dev/null || true
       fi
+      # Docker networks must be routable from table 100 — otherwise
+      # DNATed traffic from the wlan0 IP gets sent to the default
+      # gateway via wlan0 instead of to docker_gwbridge, breaking
+      # all Docker services when accessed via the WiFi IP.
+      ip route show | awk '/dev docker_gwbridge .* scope link/{print $1}' | while read -r NET; do
+        ip route replace "$NET" dev docker_gwbridge table 100 2>/dev/null || true
+      done
+      ip route show | awk '/dev docker0 .* scope link/{print $1}' | while read -r NET; do
+        ip route replace "$NET" dev docker0 table 100 2>/dev/null || true
+      done
     fi
     echo "WiFi watchdog done: wlan0=${WIFI_NOW:-FAILED}"
   ) </dev/null >/tmp/hal-wifi-recovery.log 2>&1 &
