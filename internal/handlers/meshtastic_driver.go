@@ -1765,13 +1765,13 @@ func nodeIDStr(num uint32) string {
 // ProtoFromRadio represents a parsed FromRadio message.
 type ProtoFromRadio struct {
 	ID               uint32
-	Packet           *ProtoMeshPacket
-	MyInfo           *ProtoMyNodeInfo
-	NodeInfo         *ProtoNodeInfo
-	ConfigCompleteID uint32
-	ConfigRaw        []byte // Field 5: Config message (raw protobuf)
-	ModuleConfigRaw  []byte // Field 7: ModuleConfig message (raw protobuf)
-	ChannelRaw       []byte // Field 8: Channel message (raw protobuf)
+	Packet           *ProtoMeshPacket // Field 2
+	MyInfo           *ProtoMyNodeInfo // Field 3
+	NodeInfo         *ProtoNodeInfo   // Field 4
+	ConfigRaw        []byte           // Field 5: Config message (raw protobuf)
+	ConfigCompleteID uint32           // Field 7: config_complete_id (NOT 6 — field 6 is log_record)
+	ModuleConfigRaw  []byte           // Field 9: ModuleConfig message (raw protobuf)
+	ChannelRaw       []byte           // Field 10: Channel message (raw protobuf)
 }
 
 // ProtoMeshPacket represents a parsed MeshPacket.
@@ -1887,14 +1887,6 @@ func parseFromRadio(data []byte) (*ProtoFromRadio, error) {
 			fr.NodeInfo, _ = parseNodeInfo(val)
 			pos = newPos
 
-		case 6: // config_complete_id (uint32)
-			val, n := readVarint(data, pos)
-			if n <= 0 {
-				return fr, nil
-			}
-			fr.ConfigCompleteID = uint32(val)
-			pos += n
-
 		case 5: // config (Config message)
 			val, newPos, err := readLengthDelimited(data, pos)
 			if err != nil {
@@ -1903,7 +1895,27 @@ func parseFromRadio(data []byte) (*ProtoFromRadio, error) {
 			fr.ConfigRaw = val
 			pos = newPos
 
-		case 7: // module_config (ModuleConfig message)
+		case 6: // log_record (LogRecord message — skip)
+			pos = skipField(data, pos, wireType)
+			if pos < 0 {
+				return fr, nil
+			}
+
+		case 7: // config_complete_id (uint32)
+			val, n := readVarint(data, pos)
+			if n <= 0 {
+				return fr, nil
+			}
+			fr.ConfigCompleteID = uint32(val)
+			pos += n
+
+		case 8: // rebooted (bool — skip)
+			pos = skipField(data, pos, wireType)
+			if pos < 0 {
+				return fr, nil
+			}
+
+		case 9: // moduleConfig (ModuleConfig message)
 			val, newPos, err := readLengthDelimited(data, pos)
 			if err != nil {
 				return fr, nil
@@ -1911,7 +1923,7 @@ func parseFromRadio(data []byte) (*ProtoFromRadio, error) {
 			fr.ModuleConfigRaw = val
 			pos = newPos
 
-		case 8: // channel (Channel message)
+		case 10: // channel (Channel message)
 			val, newPos, err := readLengthDelimited(data, pos)
 			if err != nil {
 				return fr, nil
