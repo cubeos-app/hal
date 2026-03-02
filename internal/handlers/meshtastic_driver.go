@@ -1955,21 +1955,19 @@ func parseMeshPacket(data []byte) (*ProtoMeshPacket, error) {
 		pos = newPos
 
 		switch fieldNum {
-		case 1: // from (uint32)
-			val, n := readVarint(data, pos)
-			if n <= 0 {
+		case 1: // from (fixed32)
+			if pos+4 > len(data) {
 				return pkt, nil
 			}
-			pkt.From = uint32(val)
-			pos += n
-		case 2: // to (uint32)
-			val, n := readVarint(data, pos)
-			if n <= 0 {
+			pkt.From = binary.LittleEndian.Uint32(data[pos : pos+4])
+			pos += 4
+		case 2: // to (fixed32)
+			if pos+4 > len(data) {
 				return pkt, nil
 			}
-			pkt.To = uint32(val)
-			pos += n
-		case 3: // channel (uint32)
+			pkt.To = binary.LittleEndian.Uint32(data[pos : pos+4])
+			pos += 4
+		case 3: // channel (uint32 varint)
 			val, n := readVarint(data, pos)
 			if n <= 0 {
 				return pkt, nil
@@ -1990,13 +1988,12 @@ func parseMeshPacket(data []byte) (*ProtoMeshPacket, error) {
 			}
 			pkt.Encrypted = val
 			pos = newPos
-		case 6: // id (uint32)
-			val, n := readVarint(data, pos)
-			if n <= 0 {
+		case 6: // id (fixed32)
+			if pos+4 > len(data) {
 				return pkt, nil
 			}
-			pkt.ID = uint32(val)
-			pos += n
+			pkt.ID = binary.LittleEndian.Uint32(data[pos : pos+4])
+			pos += 4
 		case 7: // rx_time (fixed32)
 			if pos+4 > len(data) {
 				return pkt, nil
@@ -2010,26 +2007,26 @@ func parseMeshPacket(data []byte) (*ProtoMeshPacket, error) {
 			bits := binary.LittleEndian.Uint32(data[pos : pos+4])
 			pkt.RxSNR = math.Float32frombits(bits)
 			pos += 4
-		case 9: // hop_limit (uint32)
+		case 9: // hop_limit (uint32 varint)
 			val, n := readVarint(data, pos)
 			if n <= 0 {
 				return pkt, nil
 			}
 			pkt.HopLimit = uint32(val)
 			pos += n
-		case 12: // hop_start (uint32)
-			val, n := readVarint(data, pos)
-			if n <= 0 {
-				return pkt, nil
-			}
-			pkt.HopStart = uint32(val)
-			pos += n
-		case 14: // rx_rssi (int32, varint with zigzag in proto but sent as sint32)
+		case 12: // rx_rssi (int32 varint)
 			val, n := readVarint(data, pos)
 			if n <= 0 {
 				return pkt, nil
 			}
 			pkt.RxRSSI = int32(val)
+			pos += n
+		case 15: // hop_start (uint32 varint)
+			val, n := readVarint(data, pos)
+			if n <= 0 {
+				return pkt, nil
+			}
+			pkt.HopStart = uint32(val)
 			pos += n
 		default:
 			pos = skipField(data, pos, wireType)
