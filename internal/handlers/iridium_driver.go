@@ -450,9 +450,10 @@ var SignalDescriptions = map[int]string{
 }
 
 // GetSignal queries the modem signal strength (AT+CSQ).
-// This may block up to 30s if the modem is acquiring the system.
+// Per Iridium 9600 family spec, AT+CSQ may block up to 50s during system
+// acquisition — use a 60s timeout to allow full acquisition to complete.
 func (d *IridiumDriver) GetSignal(ctx context.Context) (int, string, error) {
-	resp, err := d.SendAT(ctx, "AT+CSQ", 30*time.Second)
+	resp, err := d.SendAT(ctx, "AT+CSQ", 60*time.Second)
 	if err != nil {
 		return 0, "No signal", err
 	}

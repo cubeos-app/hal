@@ -71,7 +71,9 @@ func main() {
 
 	// Wrap router with request timeout, but bypass for SSE endpoints
 	// (http.TimeoutHandler wraps ResponseWriter, stripping http.Flusher)
-	requestTimeout := 60 * time.Second
+	// Default 120s: accommodates AT+CSQ (up to 60s per Iridium spec) and
+	// SBDIX (up to 90s) with room for handler overhead. Overridable via env.
+	requestTimeout := 120 * time.Second
 	if v := os.Getenv("HAL_REQUEST_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			requestTimeout = d
@@ -93,7 +95,7 @@ func main() {
 		Addr:         addr,
 		Handler:      handler,
 		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 90 * time.Second, // Must be > request timeout
+		WriteTimeout: 150 * time.Second, // Must be > request timeout (120s)
 		IdleTimeout:  120 * time.Second,
 	}
 
