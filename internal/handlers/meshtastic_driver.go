@@ -432,9 +432,34 @@ func (d *MeshtasticDriver) readerLoop() {
 func (d *MeshtasticDriver) processFromRadio(data []byte) {
 	fr, err := parseFromRadio(data)
 	if err != nil {
-		log.Printf("meshtastic: failed to parse FromRadio: %v", err)
+		log.Printf("meshtastic: failed to parse FromRadio (%d bytes): %v", len(data), err)
 		return
 	}
+
+	// Identify which payload type was received
+	payloadType := "unknown"
+	switch {
+	case fr.MyInfo != nil:
+		payloadType = "my_info"
+	case fr.NodeInfo != nil:
+		payloadType = "node_info"
+	case fr.ConfigCompleteID != 0:
+		payloadType = "config_complete"
+	case fr.Packet != nil:
+		payloadType = fmt.Sprintf("packet(from=%08x,portnum=%d)", fr.Packet.From, 0)
+		if fr.Packet.Decoded != nil {
+			payloadType = fmt.Sprintf("packet(from=%08x,portnum=%d)", fr.Packet.From, fr.Packet.Decoded.PortNum)
+		} else if len(fr.Packet.Encrypted) > 0 {
+			payloadType = fmt.Sprintf("encrypted_packet(from=%08x)", fr.Packet.From)
+		}
+	case fr.ConfigRaw != nil:
+		payloadType = "config"
+	case fr.ModuleConfigRaw != nil:
+		payloadType = "module_config"
+	case fr.ChannelRaw != nil:
+		payloadType = "channel"
+	}
+	log.Printf("meshtastic: recv FromRadio: type=%s len=%d", payloadType, len(data))
 
 	switch {
 	case fr.MyInfo != nil:
@@ -460,6 +485,8 @@ func (d *MeshtasticDriver) processFromRadio(data []byte) {
 		if fr.ConfigCompleteID == d.configID {
 			d.configComplete = true
 			log.Printf("meshtastic: config complete (%d nodes)", len(d.nodes))
+		} else {
+			log.Printf("meshtastic: config_complete_id mismatch: got %d, expected %d", fr.ConfigCompleteID, d.configID)
 		}
 		d.mu.Unlock()
 		d.emitEvent(MeshEvent{
@@ -487,7 +514,8 @@ func (d *MeshtasticDriver) processFromRadio(data []byte) {
 // handleMeshPacket processes a decoded MeshPacket.
 func (d *MeshtasticDriver) handleMeshPacket(pkt *ProtoMeshPacket) {
 	if pkt.Decoded == nil {
-		return // Encrypted packet — can't decode without channel key
+		log.Printf("meshtastic: dropping encrypted packet from=%08x to=%08x id=%08x (no channel key)", pkt.From, pkt.To, pkt.ID)
+		return
 	}
 
 	msg := &MeshMessage{
