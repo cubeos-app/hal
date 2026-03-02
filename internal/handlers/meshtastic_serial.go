@@ -43,6 +43,7 @@ const (
 	meshMaxPayload       = 512
 	meshWakeLen          = 32 // Number of START2 bytes to send as wake sequence
 	meshReadBufSize      = 1024
+	meshReadTimeout      = 500 * time.Millisecond // Max time file.Read() can block
 )
 
 // NewSerialTransport creates a new USB serial transport.
@@ -203,9 +204,16 @@ func (t *SerialTransport) RecvFromRadio(ctx context.Context) ([]byte, error) {
 		file := t.file
 		t.mu.Unlock()
 
-		// Read available data (non-blocking due to stty min=1 time=1)
+		// Set a read deadline so file.Read() cannot block forever.
+		// The stty "time 1" (100ms) setting may not survive Go's runtime
+		// switching the FD to non-blocking mode. This deadline guarantees
+		// we return to the ctx.Done() check within meshReadTimeout.
+		file.SetReadDeadline(time.Now().Add(meshReadTimeout))
 		n, err := file.Read(buf)
 		if err != nil {
+			if os.IsTimeout(err) {
+				continue // Deadline hit, loop back to check ctx.Done()
+			}
 			return nil, fmt.Errorf("serial read failed: %w", err)
 		}
 		if n == 0 {
