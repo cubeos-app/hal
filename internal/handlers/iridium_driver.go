@@ -47,6 +47,10 @@ type IridiumDriver struct {
 	ringActive  bool
 	monitorDone chan struct{} // closed when monitor goroutine exits
 
+	// Signal poller — emits "signal" SSE events every 60s via AT+CSQF
+	stopSignalPollCh chan struct{}
+	signalPollDone   chan struct{}
+
 	// SBDIX rate limiting — Iridium spec requires min 10s between attempts
 	lastSBDIX time.Time
 
@@ -69,9 +73,10 @@ type IridiumDriver struct {
 
 // IridiumEvent represents an event emitted on the SSE stream.
 type IridiumEvent struct {
-	Type    string `json:"type"`    // "ring_alert", "status_change", "connected", "disconnected"
-	Message string `json:"message"` // Human-readable description
-	Time    string `json:"time"`    // RFC3339 timestamp
+	Type    string `json:"type"`              // "ring_alert", "status_change", "connected", "disconnected", "signal"
+	Message string `json:"message"`           // Human-readable description
+	Time    string `json:"time"`              // RFC3339 timestamp
+	Signal  int    `json:"signal,omitempty"`  // Signal bars (0-5), only for "signal" events
 }
 
 // SBDIXResult holds the parsed response from an AT+SBDIX session.
@@ -823,7 +828,7 @@ func (d *IridiumDriver) DisableRingAlerts(ctx context.Context) error {
 	return nil
 }
 
-// startMonitorLocked starts the ring alert monitor goroutine.
+// startMonitorLocked starts the ring alert monitor goroutine and signal poller.
 // Caller must hold d.mu.
 func (d *IridiumDriver) startMonitorLocked() {
 	if d.ringActive {
@@ -834,15 +839,41 @@ func (d *IridiumDriver) startMonitorLocked() {
 	d.ringActive = true
 	go d.monitorLoop()
 	log.Printf("iridium: ring alert monitor started")
+
+	// Start signal poller (60s interval, AT+CSQF — non-blocking, cached)
+	d.stopSignalPollCh = make(chan struct{})
+	d.signalPollDone = make(chan struct{})
+	go d.signalPollerLoop()
+	log.Printf("iridium: signal poller started")
 }
 
-// stopMonitorLocked stops the ring alert monitor goroutine.
+// stopMonitorLocked stops the ring alert monitor goroutine and signal poller.
 // Caller must hold d.mu.
 func (d *IridiumDriver) stopMonitorLocked() {
 	if !d.ringActive {
 		return
 	}
 	d.ringActive = false
+
+	// Stop signal poller first (doesn't hold serial port)
+	if d.stopSignalPollCh != nil {
+		select {
+		case <-d.signalPollDone:
+			// already exited
+		default:
+			close(d.stopSignalPollCh)
+			done := d.signalPollDone
+			d.mu.Unlock()
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				log.Printf("iridium: signal poller did not exit in time")
+			}
+			d.mu.Lock()
+		}
+		d.stopSignalPollCh = nil
+		d.signalPollDone = nil
+	}
 
 	// Check if monitor already exited (e.g., serial error → reconnectLoop)
 	select {
@@ -962,6 +993,40 @@ func (d *IridiumDriver) monitorLoop() {
 			if len(line) > 256 {
 				line = line[:0]
 			}
+		}
+	}
+}
+
+// signalPollerLoop polls AT+CSQF every 60 seconds and emits "signal" SSE events.
+// Uses GetSignalFast (AT+CSQF, ~100ms, non-blocking) to avoid interfering with SBDIX sessions.
+// Runs as an independent goroutine — exits on stopSignalPollCh or when modem is disconnected.
+func (d *IridiumDriver) signalPollerLoop() {
+	defer close(d.signalPollDone)
+
+	interval := 60 * time.Second
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-d.stopSignalPollCh:
+			return
+		case <-ticker.C:
+			if !d.IsConnected() {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			strength, desc, err := d.GetSignalFast(ctx)
+			cancel()
+			if err != nil {
+				log.Printf("iridium: signal poll failed: %v", err)
+				continue
+			}
+			d.emitEvent(IridiumEvent{
+				Type:    "signal",
+				Message: desc,
+				Signal:  strength,
+			})
 		}
 	}
 }
