@@ -751,6 +751,51 @@ func (h *HALHandler) AdminFactoryResetMeshtasticNode(w http.ResponseWriter, r *h
 	successResponse(w, "factory reset command sent")
 }
 
+// AdminRemoveNodeMeshtastic godoc
+// @Summary Remove a node from the local NodeDB
+// @Description Sends a remove_by_nodenum admin command to purge a node from the local device's NodeDB
+// @Tags Meshtastic
+// @Accept json
+// @Produce json
+// @Param body body object{node_num=uint32} true "Node number to remove"
+// @Success 200 {object} map[string]string
+// @Failure 400 {object} map[string]string
+// @Failure 500 {object} map[string]string
+// @Router /meshtastic/admin/remove_node [post]
+// @Security ApiKeyAuth
+func (h *HALHandler) AdminRemoveNodeMeshtastic(w http.ResponseWriter, r *http.Request) {
+	r = limitBody(r, 1<<10)
+
+	var req struct {
+		NodeNum uint32 `json:"node_num"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		errorResponse(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.NodeNum == 0 {
+		errorResponse(w, http.StatusBadRequest, "node_num is required and must be non-zero")
+		return
+	}
+
+	if !h.meshtastic.IsConnected() {
+		ctx, cancel := getConnectContext(r.Context(), 30*time.Second)
+		defer cancel()
+		if err := h.meshtastic.Connect(ctx, ""); err != nil {
+			errorResponse(w, http.StatusInternalServerError, "not connected and auto-connect failed")
+			return
+		}
+	}
+
+	if err := h.meshtastic.AdminRemoveNode(r.Context(), req.NodeNum); err != nil {
+		log.Printf("meshtastic: admin remove_node failed: %v", err)
+		errorResponse(w, http.StatusInternalServerError, fmt.Sprintf("remove node failed: %v", err))
+		return
+	}
+
+	successResponse(w, "node removed from local NodeDB")
+}
+
 // TracerouteMeshtasticNode godoc
 // @Summary Traceroute to a Meshtastic node
 // @Description Sends a traceroute request to discover the path to a destination node

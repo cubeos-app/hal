@@ -1415,6 +1415,38 @@ func (d *MeshtasticDriver) AdminFactoryReset(ctx context.Context, destNode uint3
 	return nil
 }
 
+// AdminRemoveNode sends a remove_by_nodenum command to purge a node from the local NodeDB.
+// AdminMessage field 96 = remove_by_nodenum (uint32).
+// The packet is self-addressed (destNode = myNode) because remove_by_nodenum operates on the local device.
+func (d *MeshtasticDriver) AdminRemoveNode(ctx context.Context, nodeNum uint32) error {
+	d.mu.RLock()
+	if !d.connected || d.transport == nil {
+		d.mu.RUnlock()
+		return fmt.Errorf("not connected to Meshtastic device")
+	}
+	myNode := d.myNodeNum
+	d.mu.RUnlock()
+
+	if myNode == 0 {
+		return fmt.Errorf("own node number not known")
+	}
+	if nodeNum == 0 {
+		return fmt.Errorf("node number required")
+	}
+
+	toRadio := buildAdminRemoveNodeToRadio(myNode, nodeNum)
+	if err := d.transport.SendToRadio(toRadio); err != nil {
+		return fmt.Errorf("send remove_node failed: %w", err)
+	}
+
+	// Remove from in-memory node map
+	d.mu.Lock()
+	delete(d.nodes, nodeNum)
+	d.mu.Unlock()
+
+	return nil
+}
+
 // Traceroute sends a traceroute request to a destination node.
 // Uses portnum TRACEROUTE_APP (70) with the destination's node number as payload.
 func (d *MeshtasticDriver) Traceroute(ctx context.Context, destNode uint32) error {
@@ -1622,6 +1654,18 @@ func buildAdminFactoryResetToRadio(myNodeNum, destNode uint32) []byte {
 	admin = appendVarint(admin, 1)
 
 	return buildAdminToRadio(myNodeNum, destNode, admin)
+}
+
+// buildAdminRemoveNodeToRadio builds a ToRadio with AdminMessage field 96 (remove_by_nodenum).
+// Self-addressed (destNode = myNode) because remove operates on the local NodeDB.
+func buildAdminRemoveNodeToRadio(myNodeNum, nodeNum uint32) []byte {
+	// AdminMessage field 96: remove_by_nodenum (uint32, varint)
+	admin := make([]byte, 0, 16)
+	admin = appendVarint(admin, 96<<3|0) // field 96, varint
+	admin = appendVarint(admin, uint64(nodeNum))
+
+	// Self-addressed: remove happens locally
+	return buildAdminToRadio(myNodeNum, myNodeNum, admin)
 }
 
 // buildAdminSetConfigToRadio builds a ToRadio with AdminMessage field 34 (set_config).

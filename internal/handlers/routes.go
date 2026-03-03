@@ -239,6 +239,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/admin/reboot", h.AdminRebootMeshtasticNode)
 		r.Post("/admin/factory_reset", h.AdminFactoryResetMeshtasticNode)
 		r.Post("/admin/traceroute", h.TracerouteMeshtasticNode)
+		r.Post("/admin/remove_node", h.AdminRemoveNodeMeshtastic)
 
 		// Radio/module config
 		r.Post("/config/radio", h.SetMeshtasticRadioConfig)
