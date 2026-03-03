@@ -322,6 +322,7 @@ func TestIsKnownMeshtasticVIDPID(t *testing.T) {
 		{"1a86:7523", true},
 		{"10c4:ea60", true},
 		{"239a:8029", true},
+		{"239a:4405", true},
 		{"1915:520f", true},
 		{"0000:0000", false},
 		{"1546:01a7", false}, // GPS

@@ -493,6 +493,7 @@ var knownMeshtasticVIDPIDs = map[string]bool{
 	"1a86:7523": true, // CH340 (generic ESP32)
 	"10c4:ea60": true, // CP2102/CP2104 (generic ESP32)
 	"239a:8029": true, // RAK WisBlock (nRF52840)
+	"239a:4405": true, // TTGO T-Echo (nRF52840)
 	"1915:520f": true, // Nordic nRF52840 (RAK, T-Echo)
 }
 
@@ -565,6 +566,7 @@ func meshtasticDeviceName(vid, pid string) string {
 		"1a86:7523": "CH340 (generic Meshtastic)",
 		"10c4:ea60": "CP2102 (generic Meshtastic)",
 		"239a:8029": "RAK WisBlock (nRF52840)",
+		"239a:4405": "TTGO T-Echo (nRF52840)",
 		"1915:520f": "Nordic nRF52840 (RAK / T-Echo)",
 	}
 	if name, ok := names[vidpid]; ok {
