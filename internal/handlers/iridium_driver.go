@@ -633,12 +633,23 @@ func (d *IridiumDriver) SendBinary(ctx context.Context, data []byte) (SBDIXResul
 
 // ReadBinaryMT reads the MT buffer in binary mode.
 // Returns raw bytes and the verified checksum status.
+// Pauses the monitor loop during the read to prevent concurrent serial fd access.
 func (d *IridiumDriver) ReadBinaryMT(ctx context.Context) ([]byte, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
 	if !d.connected || d.file == nil {
 		return nil, fmt.Errorf("not connected")
+	}
+
+	// Stop monitor loop to prevent concurrent reads on the serial fd.
+	// This briefly drops/reacquires d.mu while waiting for goroutines to exit.
+	d.stopMonitorLocked()
+	defer d.startMonitorLocked()
+
+	// Re-check state after stopping monitor (mutex was briefly released)
+	if !d.connected || d.file == nil {
+		return nil, fmt.Errorf("disconnected during monitor stop")
 	}
 
 	// Send the command
@@ -653,57 +664,35 @@ func (d *IridiumDriver) ReadBinaryMT(ctx context.Context) ([]byte, error) {
 	//   {2-byte checksum}          (binary)
 	//   "\r\nOK\r\n"
 	//
-	// The echo is ~12 bytes. For an empty buffer length=0, so the binary
-	// payload is 4 bytes (0x0000 + 0x0000). We need to keep reading past
-	// the echo and collect enough data for parseSBDRBResponse to find a
-	// valid length field.
+	// Read synchronously with deadline — no goroutine needed since
+	// the monitor loop is paused and we hold the mutex.
+	d.file.SetDeadline(time.Now().Add(5 * time.Second))
+	defer d.file.SetDeadline(time.Time{}) // clear deadline
+
+	var all []byte
 	buf := make([]byte, 512)
-	deadline := time.Now().Add(5 * time.Second)
-
-	var rawBytes []byte
-	readDone := make(chan error, 1)
-
-	go func() {
-		var all []byte
-		for time.Now().Before(deadline) {
-			n, err := d.file.Read(buf)
-			if n > 0 {
-				all = append(all, buf[:n]...)
-				// Keep reading until we can successfully parse the binary
-				// response. The AT echo is ~12 bytes, the smallest valid
-				// binary payload is 4 bytes (length=0 + checksum), so we
-				// need ≥16 bytes to reliably parse. Also check for "OK"
-				// which marks end of response.
-				if len(all) >= 16 || (len(all) >= 4 && bytes.Contains(all, []byte("OK"))) {
-					rawBytes = all
-					readDone <- nil
-					return
-				}
-			}
-			if err != nil {
-				rawBytes = all
-				readDone <- err
-				return
+	for {
+		n, err := d.file.Read(buf)
+		if n > 0 {
+			all = append(all, buf[:n]...)
+			if len(all) >= 16 || (len(all) >= 4 && bytes.Contains(all, []byte("OK"))) {
+				break
 			}
 		}
-		rawBytes = all
-		readDone <- fmt.Errorf("timeout reading binary MT")
-	}()
-
-	select {
-	case err := <-readDone:
-		if err != nil && len(rawBytes) < 4 {
-			return nil, fmt.Errorf("binary read failed: %w", err)
+		if err != nil {
+			if isTimeoutError(err) && len(all) >= 4 {
+				break
+			}
+			if len(all) < 4 {
+				return nil, fmt.Errorf("binary read failed: %w", err)
+			}
+			break
 		}
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(6 * time.Second):
-		return nil, fmt.Errorf("binary read timeout")
 	}
 
-	data, err := parseSBDRBResponse(rawBytes)
+	data, err := parseSBDRBResponse(all)
 	if err != nil {
-		log.Printf("iridium: SBDRB parse failed (raw %d bytes: %x): %v", len(rawBytes), rawBytes, err)
+		log.Printf("iridium: SBDRB parse failed (raw %d bytes: %x): %v", len(all), all, err)
 		return nil, err
 	}
 
@@ -732,6 +721,8 @@ func (d *IridiumDriver) PerformSBDIX(ctx context.Context) (SBDIXResult, error) {
 }
 
 // sbdixLocked performs AT+SBDIX. Caller must hold d.mu.
+// During rate-limit waits, the mutex is temporarily released to allow signal
+// reads and other short AT commands through, preventing serial starvation.
 func (d *IridiumDriver) sbdixLocked(ctx context.Context) (SBDIXResult, error) {
 	if !d.connected || d.file == nil {
 		return SBDIXResult{}, fmt.Errorf("not connected")
@@ -739,14 +730,22 @@ func (d *IridiumDriver) sbdixLocked(ctx context.Context) (SBDIXResult, error) {
 
 	// Iridium spec requires minimum 10 seconds between SBDIX attempts.
 	// Rapid calls can get the modem temporarily blocked by the gateway.
+	// Release mutex during wait so signal reads (AT+CSQF) can get through.
 	const minSBDIXInterval = 10 * time.Second
 	if elapsed := time.Since(d.lastSBDIX); elapsed < minSBDIXInterval {
 		wait := minSBDIXInterval - elapsed
-		log.Printf("iridium: SBDIX rate limit — waiting %v", wait.Round(time.Millisecond))
+		log.Printf("iridium: SBDIX rate limit — waiting %v (releasing mutex)", wait.Round(time.Millisecond))
+		d.mu.Unlock()
 		select {
 		case <-ctx.Done():
+			d.mu.Lock()
 			return SBDIXResult{}, ctx.Err()
 		case <-time.After(wait):
+		}
+		d.mu.Lock()
+		// Re-check state after re-acquiring
+		if !d.connected || d.file == nil {
+			return SBDIXResult{}, fmt.Errorf("disconnected during rate limit wait")
 		}
 	}
 
@@ -761,8 +760,8 @@ func (d *IridiumDriver) sbdixLocked(ctx context.Context) (SBDIXResult, error) {
 
 // MailboxCheck checks for queued MT messages using a two-step approach:
 // 1. AT+SBDSX (local status, no satellite session, zero credits)
-// 2. Only if ring-alert flag is set → AT+SBDIX (satellite session, 1 credit)
-// This prevents empty SBDIX sessions that waste credits.
+// 2. Only if RA flag is set or MTWaiting > 0 → AT+SBDIX (satellite session)
+// This prevents empty SBDIX sessions that waste credits and starve the serial mutex.
 func (d *IridiumDriver) MailboxCheck(ctx context.Context) (SBDIXResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -780,26 +779,30 @@ func (d *IridiumDriver) MailboxCheck(ctx context.Context) (SBDIXResult, error) {
 	log.Printf("iridium: mailbox check — SBDSX status: MO=%v MT=%v RA=%v waiting=%d",
 		status.MOFlag, status.MTFlag, status.RAFlag, status.MTWaiting)
 
-	// If MT buffer already has data from a piggybacked delivery during a previous
-	// outbound SBDIX, report it immediately without spending a credit on SBDIX.
+	// If MT buffer already has data from a piggybacked delivery, report immediately
 	if status.MTFlag {
-		log.Printf("iridium: mailbox check — MT buffer has data (piggybacked from previous session), no SBDIX needed")
+		log.Printf("iridium: mailbox check — MT buffer has data (piggybacked), no SBDIX needed")
 		return SBDIXResult{MTStatus: 1, MTLength: 1}, nil
 	}
 
-	// Always perform SBDIX — this is both the MT poll and the mechanism
-	// through which the GSS delivers queued MT messages. Skipping SBDIX
-	// when RA=false would prevent MT delivery entirely since RA is only
-	// set briefly after the GSS sends SBDRING.
+	// Only perform SBDIX (costly satellite session) when there's a reason to:
+	// - Ring alert flag is set (GSS sent SBDRING — message is waiting)
+	// - MT waiting count > 0 (GSS reports queued messages)
+	// Without either condition, SBDIX will just burn a credit for nothing
+	// and starve the serial mutex (11-62s per session).
+	if !status.RAFlag && status.MTWaiting == 0 {
+		log.Printf("iridium: mailbox check — no RA, no MT waiting, skipping SBDIX")
+		return SBDIXResult{}, nil
+	}
+
 	log.Printf("iridium: mailbox check — performing SBDIX (RA=%v, waiting=%d)", status.RAFlag, status.MTWaiting)
 
-	// Step 2: Clear MO buffer so we don't accidentally resend
+	// Clear MO buffer so we don't accidentally resend
 	resp, err := d.sendATLocked(ctx, "AT+SBDD0", 3*time.Second)
 	if err != nil || strings.Contains(resp, "ERROR") {
 		return SBDIXResult{}, fmt.Errorf("failed to clear MO buffer")
 	}
 
-	// Step 3: Perform SBDIX (satellite session — costs 1 credit, but MT is waiting)
 	result, err := d.sbdixLocked(ctx)
 	if err == nil {
 		log.Printf("iridium: mailbox SBDIX result — mo=%d mt=%d mt_len=%d mt_queued=%d",
