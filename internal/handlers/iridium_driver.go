@@ -768,6 +768,16 @@ func (d *IridiumDriver) MailboxCheck(ctx context.Context) (SBDIXResult, error) {
 		return SBDIXResult{}, fmt.Errorf("SBDSX status check failed: %w", err)
 	}
 
+	log.Printf("iridium: mailbox check — SBDSX status: MO=%v MT=%v RA=%v waiting=%d",
+		status.MOFlag, status.MTFlag, status.RAFlag, status.MTWaiting)
+
+	// If MT buffer already has data from a piggybacked delivery during a previous
+	// outbound SBDIX, report it immediately without spending a credit on SBDIX.
+	if status.MTFlag {
+		log.Printf("iridium: mailbox check — MT buffer has data (piggybacked from previous session), no SBDIX needed")
+		return SBDIXResult{MTStatus: 1, MTLength: 1}, nil
+	}
+
 	// Only initiate a satellite session if ring alert indicates MT is waiting
 	if !status.RAFlag && status.MTWaiting == 0 {
 		log.Printf("iridium: mailbox check — no ring alert, skipping SBDIX (saved 1 credit)")
@@ -783,7 +793,12 @@ func (d *IridiumDriver) MailboxCheck(ctx context.Context) (SBDIXResult, error) {
 	}
 
 	// Step 3: Perform SBDIX (satellite session — costs 1 credit, but MT is waiting)
-	return d.sbdixLocked(ctx)
+	result, err := d.sbdixLocked(ctx)
+	if err == nil {
+		log.Printf("iridium: mailbox SBDIX result — mo=%d mt=%d mt_len=%d mt_queued=%d",
+			result.MOStatus, result.MTStatus, result.MTLength, result.MTQueued)
+	}
+	return result, err
 }
 
 // getSBDStatusLocked queries AT+SBDSX. Caller must hold d.mu.

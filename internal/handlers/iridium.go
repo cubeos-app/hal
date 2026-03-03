@@ -46,11 +46,14 @@ type IridiumSendRequest struct {
 // IridiumSendResponse represents the result of sending an SBD message.
 // @Description SBD send result
 type IridiumSendResponse struct {
-	Status     string `json:"status" example:"sent"`
-	MOStatus   int    `json:"mo_status" example:"0"`
-	MOMSN      int    `json:"momsn" example:"42"`
-	MTReceived bool   `json:"mt_received" example:"false"`
-	MTQueued   int    `json:"mt_queued" example:"0"`
+	Status     string  `json:"status" example:"sent"`
+	MOStatus   int     `json:"mo_status" example:"0"`
+	MOMSN      int     `json:"momsn" example:"42"`
+	MTReceived bool    `json:"mt_received" example:"false"`
+	MTStatus   int     `json:"mt_status" example:"0"`
+	MTLength   int     `json:"mt_length" example:"0"`
+	MTMessage  *string `json:"mt_message,omitempty"`
+	MTQueued   int     `json:"mt_queued" example:"0"`
 }
 
 // IridiumMailboxResponse represents a mailbox check result.
@@ -351,13 +354,29 @@ func (h *HALHandler) SendIridiumMessage(w http.ResponseWriter, r *http.Request) 
 		status = "failed"
 	}
 
-	jsonResponse(w, http.StatusOK, IridiumSendResponse{
+	resp := IridiumSendResponse{
 		Status:     status,
 		MOStatus:   result.MOStatus,
 		MOMSN:      result.MOMSN,
 		MTReceived: result.MTStatus == 1,
+		MTStatus:   result.MTStatus,
+		MTLength:   result.MTLength,
 		MTQueued:   result.MTQueued,
-	})
+	}
+
+	// If an MT message was piggybacked during this SBDIX session, read it
+	if result.MTStatus == 1 && result.MTLength > 0 {
+		data, err := h.iridium.ReadBinaryMT(ctx)
+		if err != nil {
+			log.Printf("iridium: MT read failed after send (piggybacked): %v", err)
+		} else {
+			encoded := base64.StdEncoding.EncodeToString(data)
+			resp.MTMessage = &encoded
+			log.Printf("iridium: piggybacked MT received during send (%d bytes)", len(data))
+		}
+	}
+
+	jsonResponse(w, http.StatusOK, resp)
 }
 
 // CheckIridiumMailbox performs a mailbox check (SBDIX without MO).
@@ -386,6 +405,9 @@ func (h *HALHandler) CheckIridiumMailbox(w http.ResponseWriter, r *http.Request)
 		errorResponse(w, http.StatusInternalServerError, sanitizeExecError("mailbox check", err))
 		return
 	}
+
+	log.Printf("iridium: mailbox check result — mo=%d mt=%d mt_len=%d mt_queued=%d",
+		result.MOStatus, result.MTStatus, result.MTLength, result.MTQueued)
 
 	resp := IridiumMailboxResponse{
 		MTReceived: result.MTStatus == 1,
