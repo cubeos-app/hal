@@ -320,6 +320,14 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/write", h.WriteI2CRegister)
 	})
 
+	// Device Supervisor
+	r.Route("/devices", func(r chi.Router) {
+		r.Get("/", h.ListDevices)
+		r.Get("/serial", h.ListSerialDevices)
+		r.Post("/scan", h.TriggerDeviceScan)
+		r.Get("/events", h.StreamDeviceEvents)
+	})
+
 	// USB
 	r.Route("/usb", func(r chi.Router) {
 		r.Get("/devices", h.GetUSBDevices)

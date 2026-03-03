@@ -17,6 +17,7 @@ type HALHandler struct {
 	powerMonitor *PowerMonitor
 	iridium      *IridiumDriver
 	meshtastic   *MeshtasticDriver
+	supervisor   *DeviceSupervisor
 	tier         string // "full" (default) or "container"
 
 	// Stream process tracking (camera)
@@ -31,10 +32,16 @@ func NewHALHandler() *HALHandler {
 	if tier == "" {
 		tier = "full"
 	}
+	iridium := NewIridiumDriver()
+	meshtastic := NewMeshtasticDriver()
+	supervisor := NewDeviceSupervisor(meshtastic, iridium)
+	supervisor.Start()
+
 	return &HALHandler{
 		powerMonitor: NewPowerMonitor(),
-		iridium:      NewIridiumDriver(),
-		meshtastic:   NewMeshtasticDriver(),
+		iridium:      iridium,
+		meshtastic:   meshtastic,
+		supervisor:   supervisor,
 		tier:         tier,
 	}
 }
@@ -55,8 +62,11 @@ func (h *HALHandler) requireFullTier(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// Close cleans up HAL resources (stream processes, etc.).
+// Close cleans up HAL resources (supervisor, stream processes, etc.).
 func (h *HALHandler) Close() {
+	if h.supervisor != nil {
+		h.supervisor.Stop()
+	}
 	h.stopStreamProcess()
 }
 

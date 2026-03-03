@@ -343,11 +343,11 @@ func resolveSysfsDevice(port string) (string, error) {
 	return resolved, nil
 }
 
-// findUSBVIDPID walks up the sysfs tree from a tty device to find the USB
+// FindUSBVIDPID walks up the sysfs tree from a tty device to find the USB
 // device's idVendor/idProduct. CDC-ACM devices (like u-blox GPS) have the
 // USB device node 2–3 levels above /sys/class/tty/ttyACMx/device, not 1.
 // Returns "vid:pid" or empty string if not found. (B68 fix)
-func findUSBVIDPID(port string) string {
+func FindUSBVIDPID(port string) string {
 	// B68: Resolve the symlink FIRST so that filepath.Join(current, "..")
 	// walks the real sysfs tree, not the lexical link path.
 	current, err := resolveSysfsDevice(port)
@@ -384,7 +384,7 @@ func findUSBVIDPID(port string) string {
 // isGPSDevice checks if a serial port belongs to a GPS receiver by VID:PID.
 // Walks up the sysfs tree to handle CDC-ACM devices. (B68 fix)
 func isGPSDevice(port string) bool {
-	vidpid := findUSBVIDPID(port)
+	vidpid := FindUSBVIDPID(port)
 	if vidpid == "" {
 		return false
 	}
@@ -486,21 +486,26 @@ func findSerialCandidates() []string {
 	return candidates
 }
 
-// isMeshtasticVIDPID checks if a serial port's USB VID:PID matches known Meshtastic devices.
-// B68: Uses findUSBVIDPID() with proper symlink resolution instead of manual path construction.
-func isMeshtasticVIDPID(port string) bool {
-	// Known Meshtastic VID:PID pairs
-	knownDevices := map[string]bool{
-		"303a:1001": true, // ESP32-S3 (Heltec V3, etc.)
-		"1a86:55d4": true, // CH343 (T-Beam, Heltec V2)
-		"1a86:7523": true, // CH340 (generic ESP32)
-		"10c4:ea60": true, // CP2102/CP2104 (generic ESP32)
-		"239a:8029": true, // RAK WisBlock (nRF52840)
-		"1915:520f": true, // Nordic nRF52840 (RAK, T-Echo)
-	}
+// knownMeshtasticVIDPIDs contains USB VID:PID pairs for known Meshtastic devices.
+var knownMeshtasticVIDPIDs = map[string]bool{
+	"303a:1001": true, // ESP32-S3 (Heltec V3, etc.)
+	"1a86:55d4": true, // CH343 (T-Beam, Heltec V2)
+	"1a86:7523": true, // CH340 (generic ESP32)
+	"10c4:ea60": true, // CP2102/CP2104 (generic ESP32)
+	"239a:8029": true, // RAK WisBlock (nRF52840)
+	"1915:520f": true, // Nordic nRF52840 (RAK, T-Echo)
+}
 
-	vidpid := findUSBVIDPID(port)
-	return knownDevices[vidpid]
+// IsKnownMeshtasticVIDPID checks if a VID:PID string matches a known Meshtastic device.
+func IsKnownMeshtasticVIDPID(vidpid string) bool {
+	return knownMeshtasticVIDPIDs[vidpid]
+}
+
+// isMeshtasticVIDPID checks if a serial port's USB VID:PID matches known Meshtastic devices.
+// B68: Uses FindUSBVIDPID() with proper symlink resolution instead of manual path construction.
+func isMeshtasticVIDPID(port string) bool {
+	vidpid := FindUSBVIDPID(port)
+	return IsKnownMeshtasticVIDPID(vidpid)
 }
 
 // scanMeshtasticPorts performs a non-destructive scan for Meshtastic devices.
@@ -525,10 +530,10 @@ func scanMeshtasticPorts(ctx context.Context) []MeshtasticDeviceInfo {
 			TransportType: "serial",
 		}
 
-		// B68: Use findUSBVIDPID() with proper symlink resolution to get VID:PID.
+		// B68: Use FindUSBVIDPID() with proper symlink resolution to get VID:PID.
 		// Previously used filepath.Join(sysPath, "../idVendor") which failed on
-		// CDC-ACM symlinks — same bug as findUSBVIDPID() had.
-		vidpid := findUSBVIDPID(port)
+		// CDC-ACM symlinks — same bug as FindUSBVIDPID() had.
+		vidpid := FindUSBVIDPID(port)
 		if vidpid != "" {
 			parts := strings.SplitN(vidpid, ":", 2)
 			if len(parts) == 2 {

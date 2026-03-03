@@ -211,7 +211,7 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 			}
 
 			// Check VID:PID against known GPS devices
-			vidpid := findUSBVIDPID(port)
+			vidpid := FindUSBVIDPID(port)
 			gpsName, isKnownGPS := knownGPSVIDPIDs[vidpid]
 
 			if isKnownGPS {
@@ -242,7 +242,7 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 			// other serial devices (e.g., FTDI FT232R serves both GPS adapters and
 			// RockBLOCK 9603 Iridium modems). Verify via NMEA probe before claiming.
 			if ambiguousName, isAmbiguous := ambiguousGPSVIDPIDs[vidpid]; isAmbiguous {
-				if probeForNMEA(port) {
+				if ProbeForNMEA(port) {
 					device := GPSDevice{
 						Port:     port,
 						Name:     ambiguousName,
@@ -288,11 +288,17 @@ func (h *HALHandler) scanGPSDevices() []GPSDevice {
 	return devices
 }
 
-// probeForNMEA opens a serial port and checks if it outputs NMEA sentences.
+// IsKnownGPSVIDPID checks if a VID:PID string matches a known GPS receiver.
+func IsKnownGPSVIDPID(vidpid string) bool {
+	_, ok := knownGPSVIDPIDs[vidpid]
+	return ok
+}
+
+// ProbeForNMEA opens a serial port and checks if it outputs NMEA sentences.
 // Used for ambiguous USB VID:PIDs (e.g., FTDI 0403:6001) that could be GPS
 // receivers or AT modems (Iridium, etc.). Returns true only if valid NMEA
 // data (e.g., $GPGGA, $GNRMC) is received within 2 seconds.
-func probeForNMEA(port string) bool {
+func ProbeForNMEA(port string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
