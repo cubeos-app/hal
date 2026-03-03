@@ -67,7 +67,8 @@ func (h *HALHandler) GetMeshtasticStatus(w http.ResponseWriter, r *http.Request)
 		if myNode := d.GetMyNode(); myNode != nil {
 			status["node_id"] = nodeIDStr(myNode.Num)
 			status["node_name"] = myNode.LongName
-			status["hw_model"] = myNode.HWModelName
+			status["hw_model"] = myNode.HWModel
+			status["hw_model_name"] = myNode.HWModelName
 		} else if myNum := d.GetMyNodeNum(); myNum != 0 {
 			status["node_id"] = nodeIDStr(myNum)
 		}
