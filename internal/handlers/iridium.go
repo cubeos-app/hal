@@ -57,6 +57,8 @@ type IridiumSendResponse struct {
 // @Description Iridium mailbox check result
 type IridiumMailboxResponse struct {
 	MTReceived bool    `json:"mt_received" example:"true"`
+	MTStatus   int     `json:"mt_status" example:"0"`
+	MTLength   int     `json:"mt_length" example:"0"`
 	MTMessage  *string `json:"mt_message,omitempty"`
 	MTQueued   int     `json:"mt_queued" example:"0"`
 }
@@ -387,6 +389,8 @@ func (h *HALHandler) CheckIridiumMailbox(w http.ResponseWriter, r *http.Request)
 
 	resp := IridiumMailboxResponse{
 		MTReceived: result.MTStatus == 1,
+		MTStatus:   result.MTStatus,
+		MTLength:   result.MTLength,
 		MTQueued:   result.MTQueued,
 	}
 

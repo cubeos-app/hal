@@ -750,7 +750,10 @@ func (d *IridiumDriver) sbdixLocked(ctx context.Context) (SBDIXResult, error) {
 	return parseSBDIX(resp)
 }
 
-// MailboxCheck performs an SBDIX without an MO message to check for MT.
+// MailboxCheck checks for queued MT messages using a two-step approach:
+// 1. AT+SBDSX (local status, no satellite session, zero credits)
+// 2. Only if ring-alert flag is set → AT+SBDIX (satellite session, 1 credit)
+// This prevents empty SBDIX sessions that waste credits.
 func (d *IridiumDriver) MailboxCheck(ctx context.Context) (SBDIXResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -759,14 +762,37 @@ func (d *IridiumDriver) MailboxCheck(ctx context.Context) (SBDIXResult, error) {
 		return SBDIXResult{}, fmt.Errorf("not connected")
 	}
 
-	// Clear MO buffer first so we don't accidentally resend
+	// Step 1: Check local modem status (no satellite session, no cost)
+	status, err := d.getSBDStatusLocked(ctx)
+	if err != nil {
+		return SBDIXResult{}, fmt.Errorf("SBDSX status check failed: %w", err)
+	}
+
+	// Only initiate a satellite session if ring alert indicates MT is waiting
+	if !status.RAFlag && status.MTWaiting == 0 {
+		log.Printf("iridium: mailbox check — no ring alert, skipping SBDIX (saved 1 credit)")
+		return SBDIXResult{}, nil
+	}
+
+	log.Printf("iridium: mailbox check — ring alert detected (RA=%v, waiting=%d), performing SBDIX", status.RAFlag, status.MTWaiting)
+
+	// Step 2: Clear MO buffer so we don't accidentally resend
 	resp, err := d.sendATLocked(ctx, "AT+SBDD0", 3*time.Second)
 	if err != nil || strings.Contains(resp, "ERROR") {
 		return SBDIXResult{}, fmt.Errorf("failed to clear MO buffer")
 	}
 
-	// Perform SBDIX (will check for MT without sending)
+	// Step 3: Perform SBDIX (satellite session — costs 1 credit, but MT is waiting)
 	return d.sbdixLocked(ctx)
+}
+
+// getSBDStatusLocked queries AT+SBDSX. Caller must hold d.mu.
+func (d *IridiumDriver) getSBDStatusLocked(ctx context.Context) (SBDStatus, error) {
+	resp, err := d.sendATLocked(ctx, "AT+SBDSX", 5*time.Second)
+	if err != nil {
+		return SBDStatus{}, err
+	}
+	return parseSBDSX(resp)
 }
 
 // ============================================================================
