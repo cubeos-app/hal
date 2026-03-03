@@ -646,9 +646,18 @@ func (d *IridiumDriver) ReadBinaryMT(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("write failed: %w", err)
 	}
 
-	// Read response: 2-byte length (big-endian) + data + 2-byte checksum
-	// First, read past any echo/header
-	headerBuf := make([]byte, 512)
+	// AT+SBDRB response format:
+	//   "AT+SBDRB\r\n"             (echo)
+	//   {2-byte big-endian length} (binary)
+	//   {data}                     (binary, 'length' bytes)
+	//   {2-byte checksum}          (binary)
+	//   "\r\nOK\r\n"
+	//
+	// The echo is ~12 bytes. For an empty buffer length=0, so the binary
+	// payload is 4 bytes (0x0000 + 0x0000). We need to keep reading past
+	// the echo and collect enough data for parseSBDRBResponse to find a
+	// valid length field.
+	buf := make([]byte, 512)
 	deadline := time.Now().Add(5 * time.Second)
 
 	var rawBytes []byte
@@ -657,14 +666,15 @@ func (d *IridiumDriver) ReadBinaryMT(ctx context.Context) ([]byte, error) {
 	go func() {
 		var all []byte
 		for time.Now().Before(deadline) {
-			n, err := d.file.Read(headerBuf)
+			n, err := d.file.Read(buf)
 			if n > 0 {
-				all = append(all, headerBuf[:n]...)
-				// We need at least 4 bytes (2 length + at least 0 data + 2 checksum)
-				// to be able to parse. Look for the binary header after any AT echo.
-				if len(all) >= 4 {
-					// Find the binary payload start — after the AT echo line
-					// The response may include "AT+SBDRB\r\n" echo followed by raw binary
+				all = append(all, buf[:n]...)
+				// Keep reading until we can successfully parse the binary
+				// response. The AT echo is ~12 bytes, the smallest valid
+				// binary payload is 4 bytes (length=0 + checksum), so we
+				// need ≥16 bytes to reliably parse. Also check for "OK"
+				// which marks end of response.
+				if len(all) >= 16 || (len(all) >= 4 && bytes.Contains(all, []byte("OK"))) {
 					rawBytes = all
 					readDone <- nil
 					return
@@ -691,10 +701,9 @@ func (d *IridiumDriver) ReadBinaryMT(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("binary read timeout")
 	}
 
-	// Strip AT echo if present — find the first non-ASCII portion
-	// or parse from the binary start
 	data, err := parseSBDRBResponse(rawBytes)
 	if err != nil {
+		log.Printf("iridium: SBDRB parse failed (raw %d bytes: %x): %v", len(rawBytes), rawBytes, err)
 		return nil, err
 	}
 

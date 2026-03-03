@@ -441,49 +441,50 @@ func (h *HALHandler) ReceiveIridiumMessage(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	format := r.URL.Query().Get("format")
-	if format == "" {
-		format = "binary"
-	}
-
-	switch format {
-	case "binary":
-		data, err := h.iridium.ReadBinaryMT(ctx)
-		if err != nil {
-			log.Printf("iridium: binary MT read: %v", err)
-			jsonResponse(w, http.StatusOK, IridiumReceiveResponse{
-				Length: 0,
-				Format: "binary",
-			})
-			return
-		}
-
+	// Try binary read first (handles both compact binary and text data).
+	// If binary parsing fails, fall back to text read (AT+SBDRT).
+	// If both fail, clear the MT buffer to un-stick the SBDSX MT flag.
+	data, err := h.iridium.ReadBinaryMT(ctx)
+	if err == nil && len(data) > 0 {
+		log.Printf("iridium: MT read OK (%d bytes, binary)", len(data))
 		jsonResponse(w, http.StatusOK, IridiumReceiveResponse{
 			Data:   base64.StdEncoding.EncodeToString(data),
 			Length: len(data),
 			Format: "binary",
 		})
-
-	case "text":
-		text, err := h.iridium.ReadTextMT(ctx)
-		if err != nil {
-			log.Printf("iridium: text MT read: %v", err)
-			jsonResponse(w, http.StatusOK, IridiumReceiveResponse{
-				Length: 0,
-				Format: "text",
-			})
-			return
-		}
-
-		jsonResponse(w, http.StatusOK, IridiumReceiveResponse{
-			Data:   text,
-			Length: len(text),
-			Format: "text",
-		})
-
-	default:
-		errorResponse(w, http.StatusBadRequest, "format must be 'binary' or 'text'")
+		return
 	}
+	if err != nil {
+		log.Printf("iridium: binary MT read failed, trying text: %v", err)
+	}
+
+	// Fallback: text read (AT+SBDRT) — works for RockBLOCK web, email-to-SBD
+	text, textErr := h.iridium.ReadTextMT(ctx)
+	if textErr == nil && len(text) > 0 {
+		log.Printf("iridium: MT read OK (%d chars, text fallback)", len(text))
+		// Return as base64 for consistent API (caller expects binary-encoded data)
+		jsonResponse(w, http.StatusOK, IridiumReceiveResponse{
+			Data:   base64.StdEncoding.EncodeToString([]byte(text)),
+			Length: len(text),
+			Format: "binary",
+		})
+		return
+	}
+	if textErr != nil {
+		log.Printf("iridium: text MT read also failed: %v", textErr)
+	}
+
+	// Both reads failed or returned empty — clear MT buffer to prevent
+	// SBDSX MT flag from staying stuck (infinite retry loop).
+	if err != nil || textErr != nil {
+		log.Printf("iridium: clearing MT buffer after failed reads")
+		_ = h.iridium.ClearBuffers(ctx, "mt")
+	}
+
+	jsonResponse(w, http.StatusOK, IridiumReceiveResponse{
+		Length: 0,
+		Format: "binary",
+	})
 }
 
 // ClearIridiumBuffers clears MO/MT/both buffers.
