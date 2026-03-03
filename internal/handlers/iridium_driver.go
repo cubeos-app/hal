@@ -787,13 +787,11 @@ func (d *IridiumDriver) MailboxCheck(ctx context.Context) (SBDIXResult, error) {
 		return SBDIXResult{MTStatus: 1, MTLength: 1}, nil
 	}
 
-	// Only initiate a satellite session if ring alert indicates MT is waiting
-	if !status.RAFlag && status.MTWaiting == 0 {
-		log.Printf("iridium: mailbox check — no ring alert, skipping SBDIX (saved 1 credit)")
-		return SBDIXResult{}, nil
-	}
-
-	log.Printf("iridium: mailbox check — ring alert detected (RA=%v, waiting=%d), performing SBDIX", status.RAFlag, status.MTWaiting)
+	// Always perform SBDIX — this is both the MT poll and the mechanism
+	// through which the GSS delivers queued MT messages. Skipping SBDIX
+	// when RA=false would prevent MT delivery entirely since RA is only
+	// set briefly after the GSS sends SBDRING.
+	log.Printf("iridium: mailbox check — performing SBDIX (RA=%v, waiting=%d)", status.RAFlag, status.MTWaiting)
 
 	// Step 2: Clear MO buffer so we don't accidentally resend
 	resp, err := d.sendATLocked(ctx, "AT+SBDD0", 3*time.Second)
