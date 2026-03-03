@@ -126,6 +126,7 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		// Capability detection (Phase 2 Access Profiles)
 		r.Get("/capabilities/dhcp", h.GetDHCPCapability)
 		r.Get("/capabilities/proxy", h.GetProxyCapability)
+		r.Get("/ethernet/dhcp-capability", h.GetEthernetDHCPCapability)
 	})
 
 	// Firewall

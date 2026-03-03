@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -307,7 +308,13 @@ func (h *HALHandler) ConfigureUPS(w http.ResponseWriter, r *http.Request) {
 		log.Printf("ConfigureUPS: stop result: %s", msg)
 	}
 
-	// Step 2: If model is "none", we're done — monitor stays stopped
+	// Step 2: Persist state to disk (survives container restarts)
+	if err := PersistUPSState(model); err != nil {
+		log.Printf("ConfigureUPS: warning: failed to persist UPS state: %v", err)
+		// Non-fatal — continue with in-memory configuration
+	}
+
+	// Step 3: If model is "none", we're done — monitor stays stopped
 	if model == "none" {
 		// Clear the env var so DetectUPS won't pick up a stale value
 		os.Setenv("HAL_UPS_MODEL", "")
@@ -320,11 +327,11 @@ func (h *HALHandler) ConfigureUPS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 3: Set HAL_UPS_MODEL env var so DetectUPS() picks it up
+	// Step 4: Set HAL_UPS_MODEL env var so DetectUPS() picks it up
 	os.Setenv("HAL_UPS_MODEL", model)
 	log.Printf("ConfigureUPS: HAL_UPS_MODEL set to %q", model)
 
-	// Step 4: Start power monitor (will use forced model via env var)
+	// Step 5: Start power monitor (will use forced model via env var)
 	msg, err := h.powerMonitor.Start()
 	if err != nil {
 		log.Printf("ConfigureUPS: error starting monitor: %v", err)
@@ -576,4 +583,54 @@ func (pm *PowerMonitor) addEventLocked(eventType, message string) {
 func ShouldAutostart() bool {
 	v := os.Getenv("HAL_POWER_MONITOR_AUTOSTART")
 	return v != "false" && v != "0" && v != "no"
+}
+
+// ============================================================================
+// UPS State Persistence
+// ============================================================================
+
+// upsStateFile is the persisted UPS configuration.
+type upsStateFile struct {
+	Model string `json:"model"`
+}
+
+// upsStatePath returns the path to the UPS state file.
+func upsStatePath() string {
+	configDir := os.Getenv("CUBEOS_CONFIG_DIR")
+	if configDir == "" {
+		configDir = "/cubeos/config"
+	}
+	return filepath.Join(configDir, "ups.json")
+}
+
+// PersistUPSState saves the configured UPS model to disk so it survives container restarts.
+func PersistUPSState(model string) error {
+	path := upsStatePath()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return fmt.Errorf("mkdir for ups state: %w", err)
+	}
+	data, err := json.Marshal(upsStateFile{Model: model})
+	if err != nil {
+		return fmt.Errorf("marshal ups state: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write ups state: %w", err)
+	}
+	log.Printf("UPS state persisted: model=%q", model)
+	return nil
+}
+
+// LoadPersistedUPSState reads the saved UPS model from disk.
+// Returns empty string if no state file exists or it cannot be read.
+func LoadPersistedUPSState() string {
+	data, err := os.ReadFile(upsStatePath())
+	if err != nil {
+		return ""
+	}
+	var state upsStateFile
+	if err := json.Unmarshal(data, &state); err != nil {
+		log.Printf("UPS state: invalid JSON in %s: %v", upsStatePath(), err)
+		return ""
+	}
+	return state.Model
 }

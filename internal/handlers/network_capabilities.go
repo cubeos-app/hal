@@ -188,6 +188,90 @@ func buildDHCPDiscover() []byte {
 	return pkt[:244]
 }
 
+// EthernetDHCPCapabilityResponse represents the result of Ethernet DHCP capability check.
+// @Description Ethernet DHCP capability check result
+type EthernetDHCPCapabilityResponse struct {
+	Available    bool   `json:"available" example:"true"`
+	Interface    string `json:"interface" example:"eth0"`
+	HasLink      bool   `json:"has_link" example:"true"`
+	ExistingDHCP string `json:"existing_dhcp" example:"192.168.1.1"`
+	Warning      string `json:"warning,omitempty" example:"Existing DHCP server detected"`
+}
+
+// GetEthernetDHCPCapability checks if CubeOS can safely serve DHCP on the Ethernet interface.
+// @Summary Check Ethernet DHCP capability
+// @Description Checks if the Ethernet interface exists, has link, and whether it's safe to serve DHCP on it (no existing DHCP server).
+// @Tags Network
+// @Produce json
+// @Success 200 {object} EthernetDHCPCapabilityResponse
+// @Failure 500 {object} ErrorResponse
+// @Router /network/ethernet/dhcp-capability [get]
+func (h *HALHandler) GetEthernetDHCPCapability(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+
+	result := EthernetDHCPCapabilityResponse{
+		Available: false,
+	}
+
+	// Find the Ethernet interface
+	ethIface := findEthernetInterface(ctx)
+	if ethIface == "" {
+		result.Warning = "No Ethernet interface found"
+		jsonResponse(w, http.StatusOK, result)
+		return
+	}
+	result.Interface = ethIface
+
+	// Check carrier (link status)
+	carrierData, err := os.ReadFile(fmt.Sprintf("/sys/class/net/%s/carrier", ethIface))
+	if err != nil || strings.TrimSpace(string(carrierData)) != "1" {
+		result.Warning = "Ethernet cable not connected"
+		jsonResponse(w, http.StatusOK, result)
+		return
+	}
+	result.HasLink = true
+
+	// Check for existing DHCP servers on this interface
+	dhcpServer, err := detectDHCPViaNmap(ctx)
+	if err == nil && dhcpServer != "" {
+		result.ExistingDHCP = dhcpServer
+		result.Warning = "Existing DHCP server detected at " + dhcpServer + " — enabling CubeOS DHCP may cause conflicts"
+		result.Available = true // available but with warning
+		jsonResponse(w, http.StatusOK, result)
+		return
+	}
+
+	// No existing DHCP — safe to use
+	result.Available = true
+	jsonResponse(w, http.StatusOK, result)
+}
+
+// findEthernetInterface returns the name of the first wired Ethernet interface, or empty string.
+func findEthernetInterface(ctx context.Context) string {
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		// Skip loopback, wireless, virtual, docker, and bridge interfaces
+		if name == "lo" || strings.HasPrefix(name, "wl") || strings.HasPrefix(name, "docker") ||
+			strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "veth") ||
+			strings.HasPrefix(name, "virbr") {
+			continue
+		}
+		// Check if it's a physical Ethernet (has /sys/class/net/<name>/device)
+		if _, err := os.Stat(fmt.Sprintf("/sys/class/net/%s/device", name)); err == nil {
+			// Check if it's wired (not wireless — wireless would have /sys/class/net/<name>/wireless)
+			if _, err := os.Stat(fmt.Sprintf("/sys/class/net/%s/wireless", name)); err != nil {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
 // GetProxyCapability checks if the local NPM instance is healthy.
 // @Summary Check proxy capability
 // @Description Checks if the local Nginx Proxy Manager is reachable and healthy.

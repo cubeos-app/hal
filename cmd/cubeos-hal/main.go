@@ -49,16 +49,19 @@ func main() {
 	// Create handler
 	h := handlers.NewHALHandler()
 
-	// Power monitor: do NOT auto-start on boot.
-	// The API will call POST /power/ups/configure with the user's saved
-	// UPS model selection from the system_config table. If no selection
-	// has been saved yet, the power monitor stays off until the user
-	// explicitly configures it via the dashboard.
-	if handlers.ShouldAutostart() {
-		log.Printf("Power monitor: HAL_POWER_MONITOR_AUTOSTART is not false, but power monitor will NOT auto-start with blind detection.")
-		log.Printf("Power monitor: waiting for UPS configuration via API (POST /power/ups/configure)")
+	// Power monitor: restore persisted UPS configuration if available.
+	// On previous runs, ConfigureUPS persists the model to /cubeos/config/ups.json.
+	// On restart, we load that state and auto-start the monitor with the saved model.
+	if persistedModel := handlers.LoadPersistedUPSState(); persistedModel != "" && persistedModel != "none" {
+		log.Printf("Power monitor: restoring persisted UPS model=%q from disk", persistedModel)
+		os.Setenv("HAL_UPS_MODEL", persistedModel)
+		if msg, err := h.PowerMonitorRef().Start(); err != nil {
+			log.Printf("Power monitor: failed to auto-start with persisted model: %v", err)
+		} else {
+			log.Printf("Power monitor: auto-started with persisted model: %s", msg)
+		}
 	} else {
-		log.Printf("Power monitor: waiting for UPS configuration via API (POST /power/ups/configure)")
+		log.Printf("Power monitor: no persisted UPS config — waiting for API configuration (POST /power/ups/configure)")
 	}
 
 	// Health check at root (outside timeout wrapper — must always respond fast)
