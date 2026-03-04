@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"net/http"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
@@ -220,50 +222,56 @@ func SetupRoutes(r chi.Router, h *HALHandler) {
 		r.Post("/android/disable", h.DisableAndroidTethering)
 	})
 
-	// Meshtastic
+	// Meshtastic (guarded — returns 501 when driver is disabled)
 	r.Route("/meshtastic", func(r chi.Router) {
-		r.Get("/devices", h.GetMeshtasticDevices)
-		r.Get("/status", h.GetMeshtasticStatus)
-		r.Get("/nodes", h.GetMeshtasticNodes)
-		r.Get("/position", h.GetMeshtasticPosition)
-		r.Post("/connect", h.ConnectMeshtastic)
-		r.Post("/disconnect", h.DisconnectMeshtastic)
-		r.Get("/messages", h.GetMeshtasticMessages)
-		r.Post("/messages/send", h.SendMeshtasticMessage)
-		r.Post("/messages/send_raw", h.SendMeshtasticRaw)
-		r.Get("/events", h.StreamMeshtasticEvents)
-		r.Post("/channel", h.SetMeshtasticChannel)
-		r.Get("/config", h.GetMeshtasticConfig)
-
-		// Admin commands
-		r.Post("/admin/reboot", h.AdminRebootMeshtasticNode)
-		r.Post("/admin/factory_reset", h.AdminFactoryResetMeshtasticNode)
-		r.Post("/admin/traceroute", h.TracerouteMeshtasticNode)
-		r.Post("/admin/remove_node", h.AdminRemoveNodeMeshtastic)
-
-		// Radio/module config
-		r.Post("/config/radio", h.SetMeshtasticRadioConfig)
-		r.Post("/config/module", h.SetMeshtasticModuleConfig)
-
-		// Waypoints
-		r.Post("/waypoints", h.SendMeshtasticWaypoint)
+		if h.meshtastic != nil {
+			r.Get("/devices", h.GetMeshtasticDevices)
+			r.Get("/status", h.GetMeshtasticStatus)
+			r.Get("/nodes", h.GetMeshtasticNodes)
+			r.Get("/position", h.GetMeshtasticPosition)
+			r.Post("/connect", h.ConnectMeshtastic)
+			r.Post("/disconnect", h.DisconnectMeshtastic)
+			r.Get("/messages", h.GetMeshtasticMessages)
+			r.Post("/messages/send", h.SendMeshtasticMessage)
+			r.Post("/messages/send_raw", h.SendMeshtasticRaw)
+			r.Get("/events", h.StreamMeshtasticEvents)
+			r.Post("/channel", h.SetMeshtasticChannel)
+			r.Get("/config", h.GetMeshtasticConfig)
+			r.Post("/admin/reboot", h.AdminRebootMeshtasticNode)
+			r.Post("/admin/factory_reset", h.AdminFactoryResetMeshtasticNode)
+			r.Post("/admin/traceroute", h.TracerouteMeshtasticNode)
+			r.Post("/admin/remove_node", h.AdminRemoveNodeMeshtastic)
+			r.Post("/config/radio", h.SetMeshtasticRadioConfig)
+			r.Post("/config/module", h.SetMeshtasticModuleConfig)
+			r.Post("/waypoints", h.SendMeshtasticWaypoint)
+		} else {
+			r.HandleFunc("/*", func(w http.ResponseWriter, r *http.Request) {
+				errorResponse(w, http.StatusNotImplemented, "Meshtastic driver disabled (HAL_DISABLE_MESHTASTIC=true)")
+			})
+		}
 	})
 
-	// Iridium
+	// Iridium (guarded — returns 501 when driver is disabled)
 	r.Route("/iridium", func(r chi.Router) {
-		r.Get("/devices", h.GetIridiumDevices)
-		r.Get("/status", h.GetIridiumStatus)
-		r.Get("/signal", h.GetIridiumSignal)
-		r.Get("/signal/fast", h.GetIridiumSignalFast)
-		r.Post("/connect", h.ConnectIridium)
-		r.Post("/disconnect", h.DisconnectIridium)
-		r.Post("/send", h.SendIridiumMessage)
-		r.Post("/mailbox_check", h.CheckIridiumMailbox)
-		r.Get("/receive", h.ReceiveIridiumMessage)
-		r.Get("/messages", h.GetIridiumMessages) // backward compat alias
-		r.Post("/clear", h.ClearIridiumBuffers)
-		r.Post("/at", h.SendIridiumATCommand)
-		r.Get("/events", h.StreamIridiumEvents)
+		if h.iridium != nil {
+			r.Get("/devices", h.GetIridiumDevices)
+			r.Get("/status", h.GetIridiumStatus)
+			r.Get("/signal", h.GetIridiumSignal)
+			r.Get("/signal/fast", h.GetIridiumSignalFast)
+			r.Post("/connect", h.ConnectIridium)
+			r.Post("/disconnect", h.DisconnectIridium)
+			r.Post("/send", h.SendIridiumMessage)
+			r.Post("/mailbox_check", h.CheckIridiumMailbox)
+			r.Get("/receive", h.ReceiveIridiumMessage)
+			r.Get("/messages", h.GetIridiumMessages)
+			r.Post("/clear", h.ClearIridiumBuffers)
+			r.Post("/at", h.SendIridiumATCommand)
+			r.Get("/events", h.StreamIridiumEvents)
+		} else {
+			r.HandleFunc("/*", func(w http.ResponseWriter, r *http.Request) {
+				errorResponse(w, http.StatusNotImplemented, "Iridium driver disabled (HAL_DISABLE_IRIDIUM=true)")
+			})
+		}
 	})
 
 	// Camera

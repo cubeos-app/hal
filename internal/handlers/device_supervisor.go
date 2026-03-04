@@ -394,10 +394,10 @@ func (s *DeviceSupervisor) reconcileSerialDevices() {
 			s.registry.SetState(entry.SysPath, StateDisconnected)
 			s.registry.ReleaseSerialPort(entry.DevPath)
 
-			if entry.Role == RoleMeshtastic && s.meshtastic.IsConnected() {
+			if entry.Role == RoleMeshtastic && s.meshtastic != nil && s.meshtastic.IsConnected() {
 				s.meshtastic.Disconnect()
 			}
-			if entry.Role == RoleIridium && s.iridium.IsConnected() {
+			if entry.Role == RoleIridium && s.iridium != nil && s.iridium.IsConnected() {
 				s.iridium.Disconnect()
 			}
 
@@ -435,6 +435,10 @@ func (s *DeviceSupervisor) identifyAndClaimPort(port string) {
 	// Step 1: VID:PID match (~1ms)
 	if vidpid != "" {
 		if IsKnownMeshtasticVIDPID(vidpid) {
+			if s.meshtastic == nil {
+				log.Printf("device-supervisor: %s is meshtastic but driver disabled", port)
+				return
+			}
 			if s.registry.ClaimSerialPort(port, RoleMeshtastic) {
 				s.updateSerialDeviceRole(port, RoleMeshtastic, StateReady)
 				log.Printf("device-supervisor: %s claimed as meshtastic (VID:PID=%s)", port, vidpid)
@@ -461,6 +465,10 @@ func (s *DeviceSupervisor) identifyAndClaimPort(port string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if ProbeATDevice(ctx, port) {
+		if s.iridium == nil {
+			log.Printf("device-supervisor: %s is iridium but driver disabled", port)
+			return
+		}
 		if s.registry.ClaimSerialPort(port, RoleIridium) {
 			s.updateSerialDeviceRole(port, RoleIridium, StateReady)
 			log.Printf("device-supervisor: %s claimed as iridium (AT probe)", port)
@@ -495,7 +503,7 @@ func (s *DeviceSupervisor) updateSerialDeviceRole(devPath string, role DeviceRol
 // reconnectDisconnected checks for devices that were connected but lost connection.
 func (s *DeviceSupervisor) reconnectDisconnected() {
 	// Meshtastic: if driver is disconnected but a meshtastic port is claimed
-	if !s.meshtastic.IsConnected() {
+	if s.meshtastic != nil && !s.meshtastic.IsConnected() {
 		if entry := s.registry.FindByRole(RoleMeshtastic); entry != nil && entry.State != StateConnected {
 			if entry.DevPath != "" {
 				if _, err := os.Stat(entry.DevPath); err == nil {
@@ -506,7 +514,7 @@ func (s *DeviceSupervisor) reconnectDisconnected() {
 	}
 
 	// Iridium: same pattern
-	if !s.iridium.IsConnected() {
+	if s.iridium != nil && !s.iridium.IsConnected() {
 		if entry := s.registry.FindByRole(RoleIridium); entry != nil && entry.State != StateConnected {
 			if entry.DevPath != "" {
 				if _, err := os.Stat(entry.DevPath); err == nil {

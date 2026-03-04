@@ -32,8 +32,22 @@ func NewHALHandler() *HALHandler {
 	if tier == "" {
 		tier = "full"
 	}
-	iridium := NewIridiumDriver()
-	meshtastic := NewMeshtasticDriver()
+
+	var iridium *IridiumDriver
+	var meshtastic *MeshtasticDriver
+
+	if os.Getenv("HAL_DISABLE_IRIDIUM") != "true" {
+		iridium = NewIridiumDriver()
+	} else {
+		log.Printf("HAL: Iridium driver disabled (HAL_DISABLE_IRIDIUM=true)")
+	}
+
+	if os.Getenv("HAL_DISABLE_MESHTASTIC") != "true" {
+		meshtastic = NewMeshtasticDriver()
+	} else {
+		log.Printf("HAL: Meshtastic driver disabled (HAL_DISABLE_MESHTASTIC=true)")
+	}
+
 	supervisor := NewDeviceSupervisor(meshtastic, iridium)
 	supervisor.Start()
 
