@@ -788,17 +788,12 @@ func (d *IridiumDriver) MailboxCheck(ctx context.Context) (SBDIXResult, error) {
 	// Only perform SBDIX (costly satellite session) when there's a reason to:
 	// - Ring alert flag is set (GSS sent SBDRING — message is waiting)
 	// - MT waiting count > 0 (GSS reports queued messages)
-	// - Stale check: last SBDIX was >5 min ago (catch missed ring alerts)
 	// Without any of these, SBDIX will just burn a credit for nothing
-	// and starve the serial mutex (11-62s per session).
-	const staleCheckInterval = 5 * time.Minute
-	stale := time.Since(d.lastSBDIX) > staleCheckInterval
-	if !status.RAFlag && status.MTWaiting == 0 && !stale {
+	// (sending an empty MO "[No payload]") and starve the serial mutex.
+	// Ring alerts (SBDRING) are the proper notification for inbound messages.
+	if !status.RAFlag && status.MTWaiting == 0 {
 		log.Printf("iridium: mailbox check — no RA, no MT waiting, skipping SBDIX")
 		return SBDIXResult{}, nil
-	}
-	if stale && !status.RAFlag && status.MTWaiting == 0 {
-		log.Printf("iridium: mailbox check — stale SBDIX (>5m), forcing check")
 	}
 
 	log.Printf("iridium: mailbox check — performing SBDIX (RA=%v, waiting=%d)", status.RAFlag, status.MTWaiting)
