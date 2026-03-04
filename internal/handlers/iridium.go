@@ -447,6 +447,9 @@ func (h *HALHandler) ReceiveIridiumMessage(w http.ResponseWriter, r *http.Reques
 	data, err := h.iridium.ReadBinaryMT(ctx)
 	if err == nil && len(data) > 0 {
 		log.Printf("iridium: MT read OK (%d bytes, binary)", len(data))
+		// Clear MT buffer after successful read to prevent SBDSX MTFlag
+		// from staying stuck and blocking new SBDIX sessions.
+		_ = h.iridium.ClearBuffers(ctx, "mt")
 		jsonResponse(w, http.StatusOK, IridiumReceiveResponse{
 			Data:   base64.StdEncoding.EncodeToString(data),
 			Length: len(data),
@@ -462,6 +465,8 @@ func (h *HALHandler) ReceiveIridiumMessage(w http.ResponseWriter, r *http.Reques
 	text, textErr := h.iridium.ReadTextMT(ctx)
 	if textErr == nil && len(text) > 0 {
 		log.Printf("iridium: MT read OK (%d chars, text fallback)", len(text))
+		// Clear MT buffer after successful read
+		_ = h.iridium.ClearBuffers(ctx, "mt")
 		// Return as base64 for consistent API (caller expects binary-encoded data)
 		jsonResponse(w, http.StatusOK, IridiumReceiveResponse{
 			Data:   base64.StdEncoding.EncodeToString([]byte(text)),
