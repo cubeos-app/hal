@@ -1,0 +1,28 @@
+{
+  "feature_id": "006-firewall-vpn-unified",
+  "parent_epic": "CUBEOS-HAL-NET-SECURITY",
+  "spec_revision": "1 (2026-05-18 — retrospective)",
+  "tasks": [
+    {
+      "id": "T-001",
+      "status": "completed",
+      "title": "Firewall + VPN endpoints (firewall.go + vpn.go)",
+      "prompt": "(RETROSPECTIVE — shipped.) 2 handler files: firewall.go (rules CRUD + NAT + forwarding + save/restore/reset) and vpn.go (WireGuard + OpenVPN + Tor + status + public-ip).",
+      "files_owned": [
+        "internal/handlers/firewall.go",
+        "internal/handlers/vpn.go",
+        "internal/handlers/routes.go"
+      ],
+      "acceptance_test": "cd hal && go test -v -run TestFirewall ./internal/handlers/ && go test -v -run TestVPN ./internal/handlers/",
+      "dependencies": [],
+      "parallelizable": true,
+      "bounded_context": "firewall",
+      "requirement_ids": ["REQ-500", "REQ-501", "REQ-502", "REQ-503", "REQ-504", "REQ-505", "REQ-506", "REQ-507", "REQ-508", "REQ-509", "REQ-510", "REQ-511", "REQ-512", "REQ-513", "REQ-514", "REQ-515", "REQ-516", "REQ-517", "REQ-518", "REQ-519"],
+      "complexity": 6,
+      "risk_score": 0.0,
+      "max_wall_clock_minutes": 90,
+      "max_loc_delta": 1100,
+      "completed_at": "2026-02"
+    }
+  ]
+}

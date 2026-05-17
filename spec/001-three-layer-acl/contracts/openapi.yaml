@@ -1,0 +1,58 @@
+openapi: 3.0.3
+info:
+  title: HAL ACL surfaces
+  version: 1.0.0
+  description: |
+    OpenAPI subset for HAL endpoints relevant to spec/001 (three-layer ACL).
+    The full HAL OpenAPI lives at /docs/openapi.yaml served by handlers/docs.go.
+servers:
+  - url: http://localhost:6005
+paths:
+  /health:
+    get:
+      summary: Liveness probe (no auth)
+      operationId: health
+      responses:
+        '200':
+          description: HAL is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string, enum: [ok]}
+                  uptime_seconds: {type: integer}
+  /docs/openapi.yaml:
+    get:
+      summary: Canonical OpenAPI spec (no auth)
+      operationId: getOpenAPISpec
+      responses:
+        '200':
+          description: OpenAPI YAML
+          content:
+            application/yaml: {}
+  /system/info:
+    get:
+      summary: System info (requires role ≥ readonly)
+      operationId: getSystemInfo
+      security:
+        - halKey: []
+      responses:
+        '200':
+          description: System info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hostname: {type: string}
+                  kernel: {type: string}
+                  arch: {type: string}
+        '401': {description: Missing or unknown X-HAL-Key}
+        '403': {description: Role does not permit this method on this path}
+components:
+  securitySchemes:
+    halKey:
+      type: apiKey
+      in: header
+      name: X-HAL-Key

@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cubeos.app/schemas/hal/ups-config.json",
+  "title": "UPSConfig",
+  "description": "Persisted UPS configuration at /cubeos/config/ups.json per spec/005 REQ-408.",
+  "type": "object",
+  "required": ["active_driver", "i2c_addr"],
+  "additionalProperties": false,
+  "properties": {
+    "active_driver": {
+      "type": "string",
+      "enum": ["pisugar3", "x1202", "x728"],
+      "description": "Driver to use; one of the 3 supported (per spec/005 REQ-403/404/405)."
+    },
+    "i2c_addr": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 127,
+      "description": "I2C 7-bit address. Typical: PiSugar3=0x57 (87), X1202=0x36 (54), X728=0x36 (54)."
+    },
+    "polling_interval_seconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3600,
+      "default": 5
+    },
+    "critical_pct": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 100.0,
+      "default": 5.0,
+      "description": "SOC threshold below which a CRITICAL event is logged."
+    }
+  }
+}

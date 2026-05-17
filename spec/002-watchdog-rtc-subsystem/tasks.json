@@ -1,0 +1,27 @@
+{
+  "feature_id": "002-watchdog-rtc-subsystem",
+  "parent_epic": "CUBEOS-HAL-RELIABILITY",
+  "spec_revision": "1 (2026-05-18 — retrospective)",
+  "tasks": [
+    {
+      "id": "T-001",
+      "status": "completed",
+      "title": "Watchdog + RTC endpoints + pet loop + wakealarm writes",
+      "prompt": "(RETROSPECTIVE — shipped.) Handlers in internal/handlers/system.go (or sibling file in the same package). Routes registered in routes.go. The watchdog enable opens /dev/watchdog + starts a 5s pet goroutine; release on context cancel. RTC endpoints shell out to hwclock + write /sys/class/rtc/rtc0/wakealarm.",
+      "files_owned": [
+        "internal/handlers/system.go",
+        "internal/handlers/routes.go"
+      ],
+      "acceptance_test": "cd hal && go test -v -run TestWatchdog ./internal/handlers/ && go test -v -run TestRTC ./internal/handlers/",
+      "dependencies": [],
+      "parallelizable": true,
+      "bounded_context": "watchdog",
+      "requirement_ids": ["REQ-100", "REQ-101", "REQ-102", "REQ-103", "REQ-104", "REQ-105", "REQ-106", "REQ-107", "REQ-108", "REQ-109", "REQ-110", "REQ-111", "REQ-112", "REQ-113", "REQ-114", "REQ-115"],
+      "complexity": 4,
+      "risk_score": 0.0,
+      "max_wall_clock_minutes": 60,
+      "max_loc_delta": 600,
+      "completed_at": "2026-02"
+    }
+  ]
+}

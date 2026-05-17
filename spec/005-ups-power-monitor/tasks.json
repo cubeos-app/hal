@@ -1,0 +1,32 @@
+{
+  "feature_id": "005-ups-power-monitor",
+  "parent_epic": "CUBEOS-HAL-POWER",
+  "spec_revision": "1 (2026-05-18 — retrospective)",
+  "tasks": [
+    {
+      "id": "T-001",
+      "status": "completed",
+      "title": "UPS detection + 3 drivers + PowerMonitor + persistence",
+      "prompt": "(RETROSPECTIVE — shipped.) 6 files in internal/handlers/: ups_detect.go (probe + dispatch), ups_pisugar3.go + ups_x1202.go + ups_x728.go (per-hardware), power.go (generic /power/* handlers), power_monitor.go (background polling service). Persists active driver to /cubeos/config/ups.json per Article C-IX.",
+      "files_owned": [
+        "internal/handlers/ups_detect.go",
+        "internal/handlers/ups_pisugar3.go",
+        "internal/handlers/ups_x1202.go",
+        "internal/handlers/ups_x728.go",
+        "internal/handlers/power.go",
+        "internal/handlers/power_monitor.go",
+        "internal/handlers/routes.go"
+      ],
+      "acceptance_test": "cd hal && go test -v -run TestUPS ./internal/handlers/ && go test -v -run TestPowerMonitor ./internal/handlers/",
+      "dependencies": [],
+      "parallelizable": true,
+      "bounded_context": "power",
+      "requirement_ids": ["REQ-400", "REQ-401", "REQ-402", "REQ-403", "REQ-404", "REQ-405", "REQ-406", "REQ-407", "REQ-408", "REQ-409", "REQ-410", "REQ-411", "REQ-412", "REQ-413", "REQ-414", "REQ-415", "REQ-416", "REQ-417", "REQ-418"],
+      "complexity": 6,
+      "risk_score": 0.0,
+      "max_wall_clock_minutes": 100,
+      "max_loc_delta": 1500,
+      "completed_at": "2026-02"
+    }
+  ]
+}
