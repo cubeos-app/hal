@@ -33,7 +33,7 @@ The retest endpoint (`POST /hardware/wifi-ap/retest/<iface>`) re-runs the iw+hos
 
 ## Capability detection
 
-`GET /network/capabilities/dhcp` checks: iptables FORWARD rules permit DHCP relay, NAT not blocking, etc.
+`GET /network/capabilities/dhcp` checks: iptables FORWARD rules permit DHCP relay, NAT not blocking
 
 `GET /network/capabilities/proxy` checks: HTTP_PROXY env propagation, NPM container alive (if applicable).
 

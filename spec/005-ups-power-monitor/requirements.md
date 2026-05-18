@@ -34,7 +34,7 @@ REQ-412: When the monitor detects critical battery (< 5% configurable), the syst
 REQ-413: The system shall expose `GET /power/status` returning aggregate power state (PSU + UPS + battery + charging).
 REQ-414: The system shall expose `GET /power/battery` returning battery details only.
 REQ-415: The system shall expose `POST /power/charging` accepting `{enabled: bool}` to control charging where the UPS supports it.
-REQ-416: The system shall expose `POST /power/battery/quickstart` for UPS drivers that require explicit quick-start (X728 etc.).
+REQ-416: The system shall expose `POST /power/battery/quickstart` for UPS drivers that require explicit quick-start (X728).
 
 ## Multi-driver coexistence
 
