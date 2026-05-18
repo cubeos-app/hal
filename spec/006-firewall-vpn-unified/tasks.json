@@ -44,7 +44,21 @@
       "risk_score": 0.0,
       "max_wall_clock_minutes": 90,
       "max_loc_delta": 1100,
-      "completed_at": "2026-02"
+      "completed_at": "2026-02",
+      "observability": {
+        "prometheus_metrics": [
+          "cubeos_hal_firewall_vpn_unified_requests_total",
+          "cubeos_hal_firewall_vpn_unified_request_duration_seconds",
+          "cubeos_hal_firewall_vpn_unified_errors_total"
+        ],
+        "slo_targets": {
+          "p95_latency_ms": 200,
+          "p99_latency_ms": 500,
+          "error_rate_max": 0.001,
+          "_notes": "placeholder \u2014 refine during task execution based on profiling"
+        },
+        "_notes": "Placeholder block for T-001. Replace with concrete metric names as code lands. If this task does NOT need metrics (e.g. CI/build task), replace this block with `no_observability_required: \"<reason>\"` instead."
+      }
     }
   ]
 }
